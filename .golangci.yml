@@ -1,0 +1,96 @@
+version: "2"
+
+# Standard project config. Includes the 10x-review complexity/duplication
+# thresholds (see 10x-review references/thresholds.md) so reviews and daily
+# linting measure the same things.
+#
+# gosec is required by the lint.config check in ../../_shared/references/standard.yml
+# ("a golangci-lint v2 config with gosec enabled"). Do not drop it to green a
+# build: exclude the specific rule at the specific path, with a reason, the way
+# the G304 block below does.
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - contextcheck
+    - dupl
+    - funlen
+    - gocognit
+    - gocyclo
+    - gosec
+    - govet
+    - nestif
+    - noctx
+    - revive
+    - sqlclosecheck
+    - staticcheck
+  settings:
+    dupl:
+      threshold: 50
+    funlen:
+      lines: 80
+      statements: -1
+    gocognit:
+      min-complexity: 16 # flags cognitive complexity > 15
+    gocyclo:
+      min-complexity: 11 # flags cyclomatic complexity > 10
+    nestif:
+      min-complexity: 4
+    staticcheck:
+      checks:
+        - "all"
+        - "-ST1000"
+        - "-U1000"
+  exclusions:
+    rules:
+      - linters:
+          - errcheck
+        text: "Error return value of .*\\.Close` is not checked"
+      # A tool whose job is reading a caller-named path trips G304 on its own
+      # purpose. Narrow this to the packages that legitimately do it, or delete
+      # it: a blanket G304 exclusion gives up the check everywhere.
+      # - linters: [gosec]
+      #   text: "G304: Potential file inclusion via variable"
+      #   path: internal/(parse|storage)/
+      # Fixtures need traversable directories and sometimes deliberately odd
+      # modes (G301/G302/G306). None of it ships in the binary.
+      - path: _test\.go
+        linters:
+          - dupl
+          - funlen
+          - gosec
+      # Concurrency tests are complex on purpose: they spawn goroutines, order
+      # them with barriers, and account for every entry across append, trip and
+      # close. That branching IS the test. Simplifying it to satisfy a
+      # complexity budget would weaken the invariant it proves. Production code
+      # stays under the threshold.
+      - path: _test\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # httptest.NewRequest is the correct call in a test: the request is
+      # synthetic and its context is supplied by the middleware under test.
+      # NewRequestWithContext would only add a Background context the handler
+      # replaces anyway.
+      - path: _test\.go
+        linters:
+          - noctx
+      # revive's unused-parameter fires on signatures Go itself dictates:
+      # t.Run's func(*testing.T), http.HandlerFunc, and zapcore.Core.Check.
+      # The parameter cannot be dropped, and renaming it to _ obscures which
+      # interface is being satisfied. Scoped to that one rule: revive's other
+      # checks (context-keys-type in particular) must keep firing in tests.
+      - path: _test\.go
+        text: "unused-parameter"
+        linters:
+          - revive
+      # A replayed record has no live caller left: the context that logged it is
+      # gone, and the trip-time context may be cancelled or belong to a
+      # different adapter. Emitting on context.Background() is the deliberate
+      # design (see the comment on slot.entry in scope.go), not an oversight.
+      # New is a constructor and takes no context by design; contextcheck reads
+      # the handler it builds as a context-losing call. Callers pass ctx at log
+      # time, which is where it belongs.
+      - path: (handler|scope)\.go|_test\.go
+        linters:
+          - contextcheck

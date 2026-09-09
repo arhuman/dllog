@@ -16,12 +16,16 @@ func emitter(mu *sync.Mutex, out *[]string, name string) Entry {
 	}}
 }
 
+// foreignKey stands in for another package's context key. It is a named type
+// rather than a bare string because a string key collides with every other
+// package using the same value, which is the collision this test rules out.
+type foreignKey struct{}
+
 func TestFromContextOnBareAndForeignContexts(t *testing.T) {
 	if FromContext(context.Background()) != nil {
 		t.Fatal("a bare context reports a carrier")
 	}
-	//nolint:staticcheck // a deliberately foreign key, which is the point.
-	foreign := context.WithValue(context.Background(), "k", "v")
+	foreign := context.WithValue(context.Background(), foreignKey{}, "v")
 	if FromContext(foreign) != nil {
 		t.Fatal("an unrelated context value was read as a carrier")
 	}
