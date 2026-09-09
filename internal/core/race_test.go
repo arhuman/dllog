@@ -93,6 +93,15 @@ func TestConcurrentAppendTripCloseAccounting(t *testing.T) {
 			// lands mid-stream with a full ring: without this the trip wins the
 			// start race, only a handful of entries are ever buffered, and the
 			// eviction and still-held buckets are never exercised at all.
+			//
+			// The closer waits on tripOnce, and that barrier is load-bearing.
+			// Both goroutines become runnable once the ring overflows, and the
+			// closer's own wait (all producers finished) is satisfied later than
+			// the tripper's, but nothing schedules them in that order. If the
+			// tripper is descheduled between waitForEvictions and Trip, the
+			// closer wins, and Trip then correctly reports false on a closed
+			// scope: the engine is right and the assertion below is wrong. Do
+			// not remove the barrier as redundant.
 			var (
 				batch     []entryID
 				dropped   int
@@ -114,7 +123,8 @@ func TestConcurrentAppendTripCloseAccounting(t *testing.T) {
 			go func() {
 				defer closeOnce.Done()
 				start.Wait()
-				done.Wait() // close only after every producer has finished
+				done.Wait()     // close only after every producer has finished
+				tripOnce.Wait() // and only after the trip, which must win
 				s.Close()
 			}()
 
