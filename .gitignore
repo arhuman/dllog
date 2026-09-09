@@ -1,0 +1,4 @@
+.claude/
+*.test
+*.out
+/dist/
