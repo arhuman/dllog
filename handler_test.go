@@ -448,6 +448,56 @@ func TestReplayKeyIsConfigurable(t *testing.T) {
 	}
 }
 
+// TestHandlerTripUsesTheConfiguredReplayKey pins the reason (*Handler).Trip
+// exists. The package-level Trip has no handler, so it cannot know the key was
+// renamed and falls back to the default. A caller who renames the key and then
+// trips explicitly would otherwise get two different markers in one stream, and
+// a query filtering on the configured one would silently miss records.
+func TestHandlerTripUsesTheConfiguredReplayKey(t *testing.T) {
+	c := &capture{}
+	h := New(c, WithLevel(slog.LevelInfo), WithReplayKey("from_buffer"))
+	log := slog.New(h)
+
+	ctx, done := Scope(context.Background())
+	defer done()
+	log.DebugContext(ctx, "buffered")
+
+	h.Trip(ctx)
+
+	recs := c.snapshot()
+	if len(recs) != 1 {
+		t.Fatalf("replayed %d records, want 1: %v", len(recs), recs)
+	}
+	if !hasAttr(recs[0], "from_buffer", true) {
+		t.Fatalf("Handler.Trip used the wrong replay key: %v", attrsOf(recs[0]))
+	}
+	if hasAttr(recs[0], DefaultReplayKey, true) {
+		t.Fatalf("Handler.Trip fell back to the default key: %v", attrsOf(recs[0]))
+	}
+}
+
+// TestPackageTripKeepsTheDefaultKey documents the deliberate split: the
+// package-level Trip stays available and stays on the default marker, so
+// existing callers are unaffected by the method above.
+func TestPackageTripKeepsTheDefaultKey(t *testing.T) {
+	c := &capture{}
+	log := slog.New(New(c, WithLevel(slog.LevelInfo), WithReplayKey("from_buffer")))
+
+	ctx, done := Scope(context.Background())
+	defer done()
+	log.DebugContext(ctx, "buffered")
+
+	Trip(ctx)
+
+	recs := c.snapshot()
+	if len(recs) != 1 {
+		t.Fatalf("replayed %d records, want 1: %v", len(recs), recs)
+	}
+	if !hasAttr(recs[0], DefaultReplayKey, true) {
+		t.Fatalf("package Trip should use the default key: %v", attrsOf(recs[0]))
+	}
+}
+
 func TestNestedScopeIsIdempotent(t *testing.T) {
 	c := &capture{}
 	log := slog.New(New(c, WithLevel(slog.LevelInfo)))

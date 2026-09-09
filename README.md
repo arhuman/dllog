@@ -164,10 +164,19 @@ For a handler created with `WithGroup`, the replay marker may nest inside that
 group rather than sitting at the top level. Reimplementing group logic to avoid
 this would cost more than it is worth.
 
-`Trip(ctx)` currently uses the default replay key even when the handler was
-built with `WithReplayKey`, because `Trip` is package level and cannot see
-handler options. A level-triggered replay uses the configured key. If you set a
-custom key and also call `Trip` directly, expect both.
+The package-level `Trip(ctx)` marks replayed records with the default key, since
+it holds no handler and cannot see `WithReplayKey`. If you rename the key, trip
+through the handler instead, which knows its own configuration:
+
+```go
+h := dllog.New(downstream, dllog.WithReplayKey("from_buffer"))
+logger := slog.New(h)
+// ...
+h.Trip(ctx) // marks with "from_buffer"
+```
+
+Both forms are otherwise identical. Mixing them puts two different markers in
+one stream, so pick one per handler.
 
 ## Status
 

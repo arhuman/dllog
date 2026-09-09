@@ -133,7 +133,28 @@ func Scope(ctx context.Context) (context.Context, func()) {
 // already tripped, or when it has been released. After it returns, records down
 // to the buffer floor pass straight through to the downstream handler until the
 // scope ends, whether or not anything had been buffered yet.
+//
+// It marks replayed records with the default key. A handler built with
+// WithReplayKey should be tripped through its own [Handler.Trip], which knows
+// the configured key; this function has no handler and cannot.
 func Trip(ctx context.Context) {
+	trip(ctx, defaultReplayKey)
+}
+
+// Trip flushes the scope on ctx exactly as the package-level [Trip] does, but
+// marks the replayed records with this handler's configured replay key.
+//
+// Prefer it over [Trip] whenever the handler was built with WithReplayKey:
+// mixing the two would put two different markers in one stream, and a query
+// filtering on the configured key would silently miss the records that the
+// package-level function replayed.
+func (h *Handler) Trip(ctx context.Context) {
+	trip(ctx, h.cfg.replayKey)
+}
+
+// trip carries the shared behaviour of both entry points. They differ only in
+// which marker key they hand to the flush.
+func trip(ctx context.Context, replayKey string) {
 	c := fromContext(ctx)
 	if c == nil {
 		return
@@ -144,10 +165,7 @@ func Trip(ctx context.Context) {
 		// when one is created. There is nothing to replay.
 		return
 	}
-	// replayKey is not reachable from here: a package-level Trip has no Handler.
-	// The flush uses the default marker key, which is why WithReplayKey is
-	// documented as applying to level-triggered replays.
-	flush(s, defaultReplayKey)
+	flush(s, replayKey)
 }
 
 // flush drains a tripped scope to the downstream handlers captured with each
