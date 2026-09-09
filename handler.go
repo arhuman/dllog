@@ -21,7 +21,7 @@ import (
 type Handler struct {
 	cfg        config
 	downstream slog.Handler
-	pool       *core.ScopePool[slot]
+	pool       *core.ScopePool[core.Entry]
 }
 
 // New returns a Handler wrapping downstream.
@@ -57,7 +57,7 @@ func New(downstream slog.Handler, opts ...Option) *Handler {
 	return &Handler{
 		cfg:        cfg,
 		downstream: downstream,
-		pool:       core.NewScopePool[slot](cfg.capacity, cfg.postTripLimit),
+		pool:       core.NewScopePool[core.Entry](cfg.capacity, cfg.postTripLimit),
 	}
 }
 
@@ -102,7 +102,7 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 		// markTripped both flushes an existing ring and records the trip when
 		// there is no ring yet, so records logged after this failure pass
 		// through either way.
-		if s := c.markTripped(); s != nil {
+		if s := c.MarkTripped(); s != nil {
 			flush(s, h.cfg.replayKey)
 		}
 		return h.downstream.Handle(ctx, r)

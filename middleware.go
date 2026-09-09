@@ -135,12 +135,7 @@ func alreadyTripped(ctx context.Context) bool {
 	if c == nil {
 		return false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.preTripped {
-		return true
-	}
-	return c.scope != nil && c.scope.Tripped()
+	return c.Tripped()
 }
 
 // statusWriter observes the status a handler writes while leaving the
