@@ -50,16 +50,27 @@ type Scope[T any] struct {
 	// skip the ring bookkeeping; it is only ever set under mu.
 	tripped atomic.Bool
 
+	// capacity is fixed at construction and never mutated, so Capacity can read
+	// it without the mutex even after Close detaches the ring.
+	capacity int
+
 	mu     sync.Mutex
 	ring   []T
 	start  int // index of the oldest entry
-	length int // entries currently held, always <= len(ring)
+	length int // entries currently held, always <= capacity
 
 	dropped   int // entries evicted by the ring
 	postTrip  int // pass-throughs already granted after the trip
 	limit     int // post-trip budget, 0 = unlimited
 	closed    bool
 	tripState bool
+
+	// pool, when non-nil, receives the ring on Close for reuse. It is the pool
+	// the scope was built from, so the ring can only ever return to a pool of
+	// its own element type and capacity. held is the box that ring came in,
+	// returned as-is so recycling stays allocation-free.
+	pool *ScopePool[T]
+	held *[]T
 }
 
 // NewScope returns a scope holding at most capacity entries before evicting the
@@ -74,13 +85,15 @@ func NewScope[T any](capacity, postTripLimit int) *Scope[T] {
 		postTripLimit = 0
 	}
 	return &Scope[T]{
-		ring:  make([]T, capacity),
-		limit: postTripLimit,
+		capacity: capacity,
+		ring:     make([]T, capacity),
+		limit:    postTripLimit,
 	}
 }
 
-// Capacity returns the ring size, after normalization.
-func (s *Scope[T]) Capacity() int { return len(s.ring) }
+// Capacity returns the ring size, after normalization. It stays valid after
+// Close, even once the ring itself has been recycled.
+func (s *Scope[T]) Capacity() int { return s.capacity }
 
 // Tripped reports whether the scope has tripped. It does not take the mutex.
 func (s *Scope[T]) Tripped() bool { return s.tripped.Load() }
@@ -118,10 +131,10 @@ func (s *Scope[T]) Append(entry T) Action {
 		return ActionPassThrough
 	}
 
-	idx := (s.start + s.length) % len(s.ring)
+	idx := (s.start + s.length) % s.capacity
 	s.ring[idx] = entry
-	if s.length == len(s.ring) {
-		s.start = (s.start + 1) % len(s.ring)
+	if s.length == s.capacity {
+		s.start = (s.start + 1) % s.capacity
 		s.dropped++
 		return ActionBuffered
 	}
@@ -148,7 +161,7 @@ func (s *Scope[T]) Trip() (entries []T, dropped int, tripped bool) {
 
 	entries = make([]T, s.length)
 	for i := range entries {
-		entries[i] = s.ring[(s.start+i)%len(s.ring)]
+		entries[i] = s.ring[(s.start+i)%s.capacity]
 	}
 	dropped = s.dropped
 
@@ -158,6 +171,12 @@ func (s *Scope[T]) Trip() (entries []T, dropped int, tripped bool) {
 
 // Close releases the scope. Subsequent Appends pass through as if no scope
 // existed, and Trip becomes a no-op. Close is idempotent and safe after a trip.
+//
+// If the scope came from a ScopePool, Close returns the ring array to that pool.
+// It does so under mu, after setting closed and detaching s.ring, so a late
+// Append racing Close either observes closed==false and completes its write
+// before the ring is released, or observes closed==true and never touches the
+// ring at all. No Append can write into a ring another scope already owns.
 func (s *Scope[T]) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -167,6 +186,14 @@ func (s *Scope[T]) Close() {
 	}
 	s.closed = true
 	s.clearRing()
+
+	held := s.held
+	s.ring = nil
+	s.held = nil
+	if s.pool != nil && held != nil {
+		s.pool.put(held)
+		s.pool = nil
+	}
 }
 
 // clearRing drops the scope's references to buffered entries so their referents
