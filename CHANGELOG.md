@@ -33,6 +33,14 @@ This project adheres to [Semantic Versioning](https://semver.org).
   no context, the scope is bound once via `Core.For(ctx)` and the caller carries
   the derived logger. `zap` is imported only by that package.
 
+### Security
+
+- The middleware's anchor record now logs the matched route pattern
+  (`GET /users/{id}`) instead of the raw URL path. Path segments routinely carry
+  user ids, reset tokens and api keys, and the anchor is emitted on the failure
+  path where logs are most likely to be exported and retained. Requests with no
+  pattern fall back to the raw path; `WithAnchorPath` overrides the derivation.
+
 ### Notes
 
 - Memory is hard-bounded: a fixed count-based ring per scope, drop-oldest with a

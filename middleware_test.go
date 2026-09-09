@@ -151,6 +151,75 @@ func TestMiddlewareTripsOn5xxAndReplaysInOrder(t *testing.T) {
 	}
 }
 
+// A raw URL path carries whatever the route interpolated into it: reset tokens,
+// api keys, user ids. The anchor is emitted by this package, on the failure path,
+// where logs are most likely to be shipped and retained, so it must not be the
+// thing that puts those values in the log. When the request was routed, the
+// pattern says the same thing with the secrets left out.
+func TestMiddlewareAnchorPrefersRoutePatternOverRawPath(t *testing.T) {
+	logger, sink := newMWLogger()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /users/{id}/reset/{token}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	serve(Middleware(WithLogger(logger)), mux,
+		httptest.NewRequest(http.MethodGet, "/users/12345/reset/SECRET-RESET-TOKEN", nil))
+
+	records := sink.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("got %d records, want 1 anchor", len(records))
+	}
+	a := mwAttrs(records[0])
+
+	got, _ := a["path"].(string)
+	if strings.Contains(got, "SECRET-RESET-TOKEN") || strings.Contains(got, "12345") {
+		t.Fatalf("anchor path = %q; it leaks the interpolated path segments", got)
+	}
+	if got != "GET /users/{id}/reset/{token}" {
+		t.Fatalf("anchor path = %q, want the route pattern", got)
+	}
+}
+
+// Without a ServeMux there is no pattern, so the raw path is all there is. It is
+// still emitted: a handler mounted directly has no templated form to fall back
+// to, and dropping the field entirely would cost the anchor its usefulness.
+func TestMiddlewareAnchorFallsBackToPathWhenUnrouted(t *testing.T) {
+	logger, sink := newMWLogger()
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	serve(Middleware(WithLogger(logger)), h, httptest.NewRequest(http.MethodGet, "/unrouted", nil))
+
+	a := mwAttrs(sink.snapshot()[0])
+	if a["path"] != "/unrouted" {
+		t.Fatalf("anchor path = %v, want /unrouted", a["path"])
+	}
+}
+
+// The caller owns the final say: a program that routes with something other than
+// net/http's mux, or that wants the path redacted its own way, supplies its own.
+func TestMiddlewareWithAnchorPathOverrides(t *testing.T) {
+	logger, sink := newMWLogger()
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	mw := Middleware(WithLogger(logger), WithAnchorPath(func(*http.Request) string {
+		return "redacted"
+	}))
+	serve(mw, h, httptest.NewRequest(http.MethodGet, "/users/12345/reset/SECRET", nil))
+
+	a := mwAttrs(sink.snapshot()[0])
+	if a["path"] != "redacted" {
+		t.Fatalf("anchor path = %v, want the value WithAnchorPath returned", a["path"])
+	}
+}
+
 func TestMiddlewareDoesNotTripOn4xx(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusNotFound, http.StatusTooManyRequests} {
 		logger, sink := newMWLogger()

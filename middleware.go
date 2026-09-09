@@ -16,15 +16,44 @@ type MWOption func(*mwConfig)
 // mwConfig is the resolved middleware settings. Every field has a usable
 // default applied by newMWConfig, so an option is only ever an override.
 type mwConfig struct {
-	tripOn func(status int) bool
-	logger *slog.Logger
+	tripOn     func(status int) bool
+	logger     *slog.Logger
+	anchorPath func(*http.Request) string
 }
 
 // newMWConfig returns the defaults: trip on 5xx, anchor through the default
 // logger. The logger is resolved lazily at request time so a program that
 // installs its logger after wiring the middleware still gets the right one.
 func newMWConfig() mwConfig {
-	return mwConfig{tripOn: func(status int) bool { return status >= 500 }}
+	return mwConfig{
+		tripOn:     func(status int) bool { return status >= 500 },
+		anchorPath: routePath,
+	}
+}
+
+// routePath is the default anchor path: the matched route pattern when there is
+// one, the raw path otherwise.
+//
+// The pattern is the safe form. A raw path carries whatever the route
+// interpolated into it, and identifiers, reset tokens and api keys all routinely
+// live in path segments; the anchor is emitted on the failure path, which is
+// exactly when logs are most likely to be exported and retained. The pattern
+// says which endpoint failed without saying it about whom.
+//
+// It is empty for a handler that was not routed through a [http.ServeMux], and
+// for one routed by a third-party router that does not populate it. The raw path
+// is the fallback there, because an anchor with no path at all cannot be
+// correlated with anything. Callers who route with something else, or who want
+// their own redaction, supply it with [WithAnchorPath].
+//
+// Pattern is only populated once the mux has matched, so this must not be called
+// before the handler has run. The middleware calls it from the deferred anchor,
+// after ServeHTTP returns, where it is set.
+func routePath(r *http.Request) string {
+	if r.Pattern != "" {
+		return r.Pattern
+	}
+	return r.URL.Path
 }
 
 // WithTripOn sets the predicate deciding whether a response status trips the
@@ -53,6 +82,26 @@ func WithLogger(l *slog.Logger) MWOption {
 	}
 }
 
+// WithAnchorPath sets how the anchor record's path attribute is derived from the
+// request. It defaults to the matched route pattern, falling back to the raw URL
+// path when the request carries no pattern.
+//
+// Use it when routing with something other than [http.ServeMux], which leaves
+// [http.Request.Pattern] empty and so falls back to the raw path, or to redact
+// the path some other way. Returning "" emits an empty path attribute rather
+// than omitting it.
+//
+// The function is called on the failure path only, after the handler has
+// returned, and must not panic: it runs inside the deferred anchor, so a panic
+// there would replace the handler's own. A nil argument is ignored.
+func WithAnchorPath(fn func(*http.Request) string) MWOption {
+	return func(c *mwConfig) {
+		if fn != nil {
+			c.anchorPath = fn
+		}
+	}
+}
+
 // Middleware returns net/http middleware that opens a dllog scope per request.
 //
 // The scope is placed on the request context, the derived request is passed
@@ -71,6 +120,11 @@ func WithLogger(l *slog.Logger) MWOption {
 // status is emitted, so a flush is never a headless pile of Debug lines. It is
 // suppressed when the handler already tripped the scope itself, which keeps a
 // handler that logged its own Error from being anchored twice.
+//
+// The path is the matched route pattern ("GET /users/{id}"), not the raw URL, so
+// the anchor does not put the ids and tokens interpolated into a path into the
+// error log. A request with no pattern falls back to the raw path; see
+// [WithAnchorPath] to control this.
 func Middleware(opts ...MWOption) func(http.Handler) http.Handler {
 	cfg := newMWConfig()
 	for _, opt := range opts {
@@ -122,7 +176,7 @@ func (c mwConfig) anchor(ctx context.Context, r *http.Request, status int) {
 	}
 	logger.ErrorContext(ctx, AnchorMessage,
 		slog.String("method", r.Method),
-		slog.String("path", r.URL.Path),
+		slog.String("path", c.anchorPath(r)),
 		slog.Int("status", status),
 	)
 }

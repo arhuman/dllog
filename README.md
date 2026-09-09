@@ -143,10 +143,20 @@ Middleware options:
 |---|---|---|
 | `WithTripOn` | `status >= 500` | Predicate deciding which statuses trip |
 | `WithLogger` | `slog.Default()` | Logger used for the anchor error record |
+| `WithAnchorPath` | route pattern, else raw path | How the anchor's `path` attribute is derived |
 
 The middleware does not trip on 4xx or on context cancellation: 404s and client
 disconnects would bury the signal. On a panic it trips, then re-panics with the
 original value. It is a logging tool, never a recovery layer.
+
+The anchor record's `path` is the matched route pattern (`GET /users/{id}`),
+not the raw URL. Path segments routinely carry user ids, reset tokens and api
+keys, and the anchor is emitted on the failure path, which is exactly when logs
+get exported and retained; the pattern says which endpoint failed without saying
+it about whom. A request that carries no pattern, either mounted directly or
+routed by something other than `http.ServeMux`, falls back to the raw path.
+Use `WithAnchorPath` to supply your own router's route, or to redact it
+differently.
 
 ## Caveats
 
