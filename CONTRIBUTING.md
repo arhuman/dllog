@@ -13,14 +13,16 @@ TODO
 
 | Target | Purpose |
 | ------ | ------- |
-| `make build` | Compile the binary (version-stamped via `-ldflags`). |
-| `make test` | Unit + integration tests. |
-| `make fulltest` | All tests including DB-backed paths. Run before committing storage/handler changes. |
+| `make build` | Compile every package. |
+| `make test` | Short unit tests. |
+| `make fulltest` | All tests with the race detector and coverage. |
+| `make bench` | Benchmarks with allocation counts. |
 | `make cover` | Tests with coverage; fails below `COVER_MIN`. |
-| `make audit` | `go vet` + `golangci-lint` + `govulncheck` + coverage gate. Same command locally and in CI. |
+| `make audit` | Coverage gate, `checkcore`, `checkpromotion`, `go mod verify`, `golangci-lint`, `govulncheck`. Same command locally and in CI. |
+| `make checkcore` | Fail if `internal/` depends on `log/slog`. |
+| `make checkpromotion` | Fail if our code imports a module `go.mod` marks indirect. |
 | `make tidy` | `go fmt` + `go mod tidy`. |
 | `make ci` | Full local pipeline (`tidy` + `audit` + `fulltest`). |
-| `make release` | Derive the next semver from Conventional Commits, gate via `make ci`, tag and push. |
 
 ## Commit messages
 
