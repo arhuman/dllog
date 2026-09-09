@@ -178,9 +178,57 @@ h.Trip(ctx) // marks with "from_buffer"
 Both forms are otherwise identical. Mixing them puts two different markers in
 one stream, so pick one per handler.
 
+## zap
+
+The engine lives in `internal/core` and imports no logging library, so the same
+buffering drives zap through `zapadapter`. A scope is shared: an `Error` logged
+through zap replays what slog buffered on that context, and the reverse, in the
+order the entries were logged.
+
+```go
+base := zapadapter.New(downstream) // downstream wide open at Debug, as with slog
+logger := zap.New(base)            // process logger, no scope, plain level filter
+
+ctx, done := zapadapter.Scope(r.Context())
+defer done()
+
+reqLog := zap.New(base.For(ctx))   // request logger, buffering
+reqLog.Debug("loading cart")       // buffered
+reqLog.Error("payment declined")   // replays the buffer, then writes this
+```
+
+### The binding cost
+
+This is the one place the two adapters differ, and it is imposed by zap rather
+than chosen. `zapcore.Core.Check` and `Write` receive no `context.Context`, so
+unlike the slog handler this adapter cannot find the scope at log time. The
+context is bound once, up front, with `Core.For`, and **the caller carries the
+derived logger rather than the context**.
+
+With slog you thread a context through call sites you already thread it through:
+
+```go
+slog.DebugContext(ctx, "loading cart") // scope found per record
+```
+
+With zap you must carry `reqLog` to every function that logs inside the
+operation, or re-derive it from `base.For(ctx)` where you have the context. A
+`zap.Logger` from `zap.New(base)` with no binding is not buffering; it is a
+plain level filter, and its `Debug` calls cost what a disabled zap call costs.
+Passing the wrong one is silent: nothing errors, the records simply are not
+buffered.
+
+`Core.Trip()` is a method for the same reason, taking no context: the binding
+already happened. It marks replayed entries with the core's configured replay
+key, which a package-level function could not see.
+
+Everything else matches the slog handler: same options (`WithLevel`,
+`WithCapacity`, `WithTripLevel`, `WithBufferFloor`, `WithPostTripLimit`,
+`WithReplayKey`), same drop-oldest ring, same post-trip pass-through. `zap` is
+imported only by `zapadapter`, so the root package stays dependency-free.
+
 ## Status
 
-The `log/slog` handler and the HTTP middleware are implemented and tested. The
-engine lives in `internal/core` and does not import `log/slog`, so adapters for
-other logging libraries can reuse it. A zap adapter is planned and does not
-exist yet.
+The `log/slog` handler, the HTTP middleware, and the zap adapter are implemented
+and tested. Neither adapter is built on the other: both drive `internal/core`
+directly, and either one's `Scope` is visible to the other.
