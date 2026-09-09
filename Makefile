@@ -15,14 +15,14 @@ GOVULNCHECK_VERSION ?= v1.1.4
 # ==================================================================================== #
 # PHONY DECLARATIONS (in alphabetical order)
 # ==================================================================================== #
-.PHONY: audit bench build checkcore checklen ci clean cover fulltest help test tidy tools
+.PHONY: audit bench build checkcore checklen checkpromotion ci clean cover fulltest help test tidy tools
 
 # ==================================================================================== #
 # STANDARD TARGETS (in alphabetical order)
 # ==================================================================================== #
 
-## audit: run quality control checks (mod verify, lint, vuln scan, core imports, coverage gate)
-audit: cover checkcore
+## audit: run quality control checks (mod verify, lint, vuln scan, core imports, promotion, coverage gate)
+audit: cover checkcore checkpromotion
 	@which golangci-lint > /dev/null || $(MAKE) tools
 	@which govulncheck > /dev/null || $(MAKE) tools
 	go mod verify
@@ -40,6 +40,10 @@ build:
 ## checkcore: fail if internal/ depends on log/slog
 checkcore:
 	@./scripts/check-core-imports.sh
+
+## checkpromotion: fail if our code imports a module go.mod marks indirect
+checkpromotion:
+	@./scripts/check-promotion.sh
 
 ## checklen: fail if any non-generated .go file exceeds LINE_LIMIT lines
 checklen:
