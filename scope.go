@@ -98,12 +98,29 @@ func (c *carrier) bound() *ring {
 
 // fromContext returns the carrier ctx holds, or nil when ctx has no scope.
 //
-// It recovers this adapter's own wrapper, so the pointer identity a caller sees
-// is stable across calls on the same context: two lookups on one scope return
-// the same *carrier.
+// For a scope this package opened it recovers our own wrapper, so two lookups
+// return the identical *carrier and callers may compare them to decide whether
+// they are looking at one scope.
+//
+// For a scope another adapter opened it resolves through the core and wraps the
+// shared carrier afresh each time. The wrapper is stateless, so the scope,
+// its ring and its trip state are still shared; only the wrapper pointer
+// differs. Memoizing one here would mean retaining a wrapper per foreign scope
+// for the life of the process, which is the unbounded growth the bounded-memory
+// design rules out. Compare the embedded Carrier, not the wrapper.
 func fromContext(ctx context.Context) *carrier {
-	c, _ := core.HolderFromContext(ctx).(*carrier)
-	return c
+	if c, ok := core.HolderFromContext(ctx).(*carrier); ok {
+		return c
+	}
+	// The scope was opened by another adapter, so the context holds its wrapper
+	// rather than ours. Resolving through the core reaches the shared carrier
+	// anyway; without this the handler would treat the context as scope-less and
+	// drop every record logged below the configured level.
+	shared := core.FromContext(ctx)
+	if shared == nil {
+		return nil
+	}
+	return &carrier{Carrier: shared}
 }
 
 // Scope opens a buffering scope on ctx and returns the derived context together

@@ -169,6 +169,73 @@ func TestFromContextIgnoresForeignValues(t *testing.T) {
 	}
 }
 
+// TestForeignScopeIsNotDropped pins the failure the zap adapter exposed: when
+// another adapter opens the scope, this package must still see it.
+//
+// The old fromContext type-asserted to *carrier, so a scope carried by anyone
+// else's wrapper resolved to nil. The handler then treated the context as
+// scope-less and, at a level below the configured one, DROPPED the record: not
+// buffered, not passed through, gone. Trip was a no-op on the same context.
+// Silent log loss is the one outcome this library exists to prevent.
+func TestForeignScopeIsNotDropped(t *testing.T) {
+	c := &capture{}
+	log := slog.New(New(c, WithLevel(slog.LevelInfo)))
+
+	// A scope opened by some other adapter: a bare *core.Carrier, not our wrapper.
+	ctx := core.NewContext(context.Background(), new(core.Carrier))
+
+	if core.FromContext(ctx) == nil {
+		t.Fatal("test setup is wrong: the core does not see the carrier")
+	}
+	if fromContext(ctx) == nil {
+		t.Fatal("a scope opened by another adapter resolved to nil: records logged " +
+			"on this context are silently dropped")
+	}
+
+	log.DebugContext(ctx, "buffered by the foreign scope")
+	Trip(ctx)
+
+	if got := c.messages(); !equal(got, []string{"buffered by the foreign scope"}) {
+		t.Fatalf("messages = %v, want the buffered record replayed: a Debug logged "+
+			"in a foreign scope must be buffered and replayed, never dropped", got)
+	}
+}
+
+// TestForeignScopeResolvesToOneScope pins what identity is actually for. A
+// scope this package opened resolves to one memoized *carrier, so the join test
+// can compare pointers. A foreign scope gets a fresh wrapper per lookup, since
+// there is nowhere in this package to memoize one that dies with the scope, and
+// memoizing outside it would retain a wrapper per scope forever, which is the
+// unbounded growth R5 forbids.
+//
+// The wrapper is stateless, so what must agree is the shared carrier underneath.
+// Two lookups that resolved to different scopes would split one operation's
+// buffer in two.
+func TestForeignScopeResolvesToOneScope(t *testing.T) {
+	ctx := core.NewContext(context.Background(), new(core.Carrier))
+
+	a, b := fromContext(ctx), fromContext(ctx)
+	if a == nil || b == nil {
+		t.Fatal("a foreign scope resolved to nil")
+	}
+	if a.Carrier != b.Carrier {
+		t.Fatal("two lookups of one foreign scope reached different carriers: " +
+			"records logged through each would land in different buffers")
+	}
+}
+
+// TestOwnScopeKeepsPointerIdentity guards the fast path, which real callers do
+// compare: TestScopeJoinsRatherThanNests asserts fromContext(inner) equals
+// fromContext(outer), and that only holds while our own wrapper is memoized.
+func TestOwnScopeKeepsPointerIdentity(t *testing.T) {
+	ctx, done := Scope(context.Background())
+	defer done()
+
+	if a, b := fromContext(ctx), fromContext(ctx); a != b {
+		t.Fatalf("fromContext returned different pointers for our own scope: %p vs %p", a, b)
+	}
+}
+
 // fakeAdapter stands in for a second logging library's adapter, in the shape a
 // real one (zap) would take: its own entry type, its own pool, and no knowledge
 // of this package's slot, Handler or slog at all. It reaches the scope only
