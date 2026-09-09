@@ -163,8 +163,14 @@ func TestErrorBeforeAnyBufferedRecordTripsScope(t *testing.T) {
 	}
 }
 
+// foreignKey stands in for another package's context key. It is a named type
+// rather than struct{}{} because an empty anonymous struct collides with every
+// other package using the same trick, which is the collision this test would
+// otherwise be demonstrating instead of ruling out.
+type foreignKey struct{}
+
 func TestFromContextIgnoresForeignValues(t *testing.T) {
-	if fromContext(context.WithValue(context.Background(), struct{}{}, "x")) != nil {
+	if fromContext(context.WithValue(context.Background(), foreignKey{}, "x")) != nil {
 		t.Fatal("an unrelated context value was read as a carrier")
 	}
 }
