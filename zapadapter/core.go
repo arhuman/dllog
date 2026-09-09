@@ -15,7 +15,7 @@
 //
 //	base := zapadapter.New(downstream)
 //	logger := zap.New(base)          // process logger, no scope
-//	ctx, done := dllog.Scope(r.Context())
+//	ctx, done := zapadapter.Scope(r.Context())
 //	defer done()
 //	reqLog := zap.New(base.For(ctx)) // request logger, buffering
 //
@@ -27,10 +27,10 @@ package zapadapter
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"go.uber.org/zap/zapcore"
 
-	"github.com/arhuman/dllog"
 	"github.com/arhuman/dllog/internal/core"
 )
 
@@ -243,9 +243,9 @@ type carrier struct{ *core.Carrier }
 // or nil when ctx has no scope.
 //
 // It resolves through core.FromContext rather than looking for its own wrapper
-// type, because the scope is normally opened by dllog.Scope and therefore
-// carries the slog adapter's wrapper. Reaching the shared *core.Carrier under
-// whichever wrapper is present is exactly what makes the two adapters share one
+// type, because the scope may have been opened by any adapter and would then
+// carry that adapter's wrapper. Reaching the shared *core.Carrier under
+// whichever wrapper is present is exactly what makes the adapters share one
 // ring.
 func fromContext(ctx context.Context) *carrier {
 	shared := core.FromContext(ctx)
@@ -257,21 +257,26 @@ func fromContext(ctx context.Context) *carrier {
 
 // Scope opens a buffering scope on ctx and returns the derived context together
 // with the function that releases it. It joins rather than nests, exactly as
-// [dllog.Scope] does.
+// dllog.Scope does.
 //
-// It delegates to [dllog.Scope] rather than storing its own carrier, and that
-// delegation is load-bearing rather than a convenience. The root package
-// resolves a scope by type-asserting the context value to its own unexported
-// wrapper type, not through core.Holder, so a carrier this package stored
-// itself would be invisible to the slog handler: its Debug records would be
-// dropped unbuffered and [dllog.Trip] would silently no-op. Going through
-// dllog.Scope is the only way to open a scope BOTH adapters can see.
+// The returned done must be called, normally with defer, exactly once per
+// successful call; calling it more than once is safe and does nothing. A scope
+// that ends without tripping discards its buffer.
 //
-// The asymmetry is one-directional. This adapter resolves through
-// core.FromContext and so accepts a scope opened by anyone; the slog handler
-// does not. See the package documentation on the core abstraction's limits.
+// It stores this package's own wrapper, not the slog adapter's, and the two are
+// interchangeable: both resolve through core.FromContext, so a scope opened here
+// buffers slog records logged on the same context, and the reverse. That is what
+// keeps this package free of any import of the root dllog package, so neither
+// adapter is built on the other.
 func Scope(ctx context.Context) (context.Context, func()) {
-	return dllog.Scope(ctx)
+	if cr := fromContext(ctx); cr != nil {
+		return ctx, func() {}
+	}
+
+	cr := &carrier{Carrier: &core.Carrier{}}
+	var once sync.Once
+	done := func() { once.Do(cr.Close) }
+	return core.NewContext(ctx, cr), done
 }
 
 // clone copies fields so a buffered entry is not aliased by a caller that
