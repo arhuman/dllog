@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: CI only reads the repo.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor = the go.mod minimum; "stable" = latest release.
+        go: ["1.25", "stable"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+      - name: Build
+        run: make build
+      - name: Test (race)
+        run: make test
+      - name: Benchmarks (smoke, 1x)
+        run: go test -run='^$' -bench=. -benchmem -benchtime=1x ./...
+
+  lint:
+    name: lint + vuln + coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          # Not `stable`: the pinned golangci-lint's staticcheck must understand
+          # this toolchain's stdlib; a newer Go panics it.
+          go-version-file: go.mod
+      # Versions MUST equal the Makefile's GOLANGCI_VERSION / GOVULNCHECK_VERSION
+      # and _shared/references/versions.md.
+      - name: Install pinned tools
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+      # `make audit` = coverage gate + core-import guard + promotion check +
+      # go mod verify + golangci-lint + govulncheck. One code path, local and CI.
+      - name: Audit
+        run: make audit
+
+  commitlint:
+    name: commit messages
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Conventional Commits on PR commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9/_.-]+\))?(!)?: .+'
+          fail=0
+          for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            subject=$(git log -1 --format=%s "$sha")
+            if ! printf '%s' "$subject" | grep -qE "$pattern"; then
+              echo "::error::commit $sha is not Conventional Commits: '$subject'"
+              fail=1
+            fi
+          done
+          exit $fail
