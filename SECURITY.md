@@ -2,8 +2,7 @@
 
 ## Supported versions
 
-Which versions receive security fixes. Adjust the rows to the project's release model
-(a single rolling deployment supports only the latest tag; a library may support the last N minors).
+Fixes land on the latest tag. Until 1.0, older tags do not receive backports.
 
 | Version | Supported |
 | ------- | --------- |
@@ -12,6 +11,6 @@ Which versions receive security fixes. Adjust the rows to the project's release 
 
 ## Reporting a vulnerability
 
-Do not open a public issue for a security report. Email TODO (security contact) with a
-description and, if possible, reproduction steps. Expect an acknowledgement within TODO
-(e.g. a few business days). Please allow time for a fix before any public disclosure.
+Do not open a public issue for a security report. Email arhuman@gmail.com with a
+description and, if possible, reproduction steps. Expect an acknowledgement within
+a few business days. Please allow time for a fix before any public disclosure.

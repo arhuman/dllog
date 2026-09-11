@@ -1,5 +1,10 @@
 # dllog
 
+[![CI](https://github.com/arhuman/dllog/actions/workflows/ci.yml/badge.svg)](https://github.com/arhuman/dllog/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/arhuman/dllog.svg)](https://pkg.go.dev/github.com/arhuman/dllog)
+[![Go Report Card](https://goreportcard.com/badge/github.com/arhuman/dllog)](https://goreportcard.com/report/github.com/arhuman/dllog)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Dynamic level log: a `log/slog` handler that keeps below-level records in a
 bounded per-operation buffer and replays them when that operation fails.
 
@@ -296,3 +301,12 @@ imported only by `zapadapter`, so the root package stays dependency-free.
 The `log/slog` handler, the HTTP middleware, and the zap adapter are implemented
 and tested. Neither adapter is built on the other: both drive `internal/core`
 directly, and either one's `Scope` is visible to the other.
+
+## Security
+
+Report a vulnerability by email rather than a public issue: see
+[SECURITY.md](SECURITY.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE).

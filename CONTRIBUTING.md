@@ -1,12 +1,16 @@
 # Contributing
 
-How to build, test, and submit changes. Keep it short and true; delete sections that do not apply.
+How to build, test, and submit changes.
 
 ## Setup
 
+No services to bring up: the only dependency is zap, and it is confined to
+`zapadapter`.
+
 ```bash
-# clone, then bring up dependencies (DB, etc.)
-TODO
+git clone https://github.com/arhuman/dllog
+cd dllog
+make ci
 ```
 
 ## Make targets
@@ -34,4 +38,8 @@ and in CI (commitlint on PRs).
 
 1. `make ci` passes.
 2. Update `CHANGELOG.md` under `[Unreleased]`.
-3. TODO: project-specific checks (e.g. verify UI flows in a browser).
+3. Keep the invariants: `internal/` imports no logging library, the two adapters
+   stay peers (neither imports the other), and memory stays hard-bounded. The
+   first two are enforced by `make checkcore` and `make checkpromotion`.
+4. Changing a benchmark figure in `README.md` means re-running `make bench` and
+   quoting the new run, not adjusting the old number.
