@@ -15,7 +15,7 @@ GOVULNCHECK_VERSION ?= v1.1.4
 # ==================================================================================== #
 # PHONY DECLARATIONS (in alphabetical order)
 # ==================================================================================== #
-.PHONY: audit bench build checkcore checklen checkpromotion ci clean cover fulltest help test tidy tools
+.PHONY: audit bench build checkcore checklen checkpromotion ci clean cover fulltest help release test tidy tools
 
 # ==================================================================================== #
 # STANDARD TARGETS (in alphabetical order)
@@ -77,6 +77,10 @@ fulltest:
 help:
 	@echo 'Usage:'
 	@sed -n 's/^##//p' ${MAKEFILE_LIST} | column -t -s ':' | sed -e 's/^/ /'
+
+## release: derive the next version from the commit log, gate, stamp, tag and push
+release:
+	@./scripts/release.sh $(VERSION)
 
 ## test: short unit tests only, seconds on a warm cache, for the red/green loop.
 test:

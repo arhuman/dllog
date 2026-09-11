@@ -27,6 +27,7 @@ make ci
 | `make checkpromotion` | Fail if our code imports a module `go.mod` marks indirect. |
 | `make tidy` | `go fmt` + `go mod tidy`. |
 | `make ci` | Full local pipeline (`tidy` + `audit` + `fulltest`). |
+| `make release` | Derive the next version from the commit log, gate on `make ci`, stamp `CHANGELOG.md`, tag and push. Override with `make release VERSION=v1.2.3`. |
 
 ## Commit messages
 
@@ -43,3 +44,14 @@ and in CI (commitlint on PRs).
    first two are enforced by `make checkcore` and `make checkpromotion`.
 4. Changing a benchmark figure in `README.md` means re-running `make bench` and
    quoting the new run, not adjusting the old number.
+
+## Releasing
+
+`make release`. It derives the next version from the Conventional Commits since
+the last tag, asks you to confirm it, runs `make ci`, promotes `[Unreleased]` in
+`CHANGELOG.md` to a dated heading, then commits, tags and pushes.
+
+For a library the tag is the release: the module proxy serves whatever the tag
+points at, and a published tag cannot be moved or withdrawn. `release.yml` runs
+on the pushed tag and fails if it disagrees with the top version heading in
+`CHANGELOG.md`.

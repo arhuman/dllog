@@ -1,0 +1,54 @@
+# Release verification: a v* tag is the release. The module proxy serves whatever
+# the tag points at, so there is no artifact to build or upload here; goreleaser
+# would have nothing to do. What can still go wrong is the tag disagreeing with
+# what the repo claims, so this job gates on that before the tag is consumable.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify the tagged release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The changelog check reads history, not just the tagged tree.
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # A tag is permanent once the proxy has served it: it cannot be moved or
+      # withdrawn. Run the same gate the release script ran locally, in case the
+      # tag was pushed by hand.
+      - name: Quality gate
+        run: make ci
+
+      - name: Tag matches CHANGELOG
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          top=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md \
+                | tr -d '#[] ' || true)
+          if [ -z "$top" ]; then
+            echo "::error::CHANGELOG.md has no released version heading"
+            exit 1
+          fi
+          if [ "$tag" != "$top" ]; then
+            echo "::error::tag v$tag does not match the top CHANGELOG version [$top]"
+            exit 1
+          fi
+          echo "tag v$tag matches CHANGELOG [$top]"
+
+      # pkg.go.dev serves what the proxy fetched; warming it makes the new
+      # version resolvable immediately rather than on first request.
+      - name: Warm the module proxy
+        run: |
+          GOPROXY=proxy.golang.org go list -m \
+            "github.com/arhuman/dllog@${GITHUB_REF_NAME}" || \
+            echo "::warning::proxy not warm yet; it will populate on first fetch"
