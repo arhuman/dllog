@@ -13,7 +13,7 @@
 // handler this adapter cannot find the scope at log time. The context is bound
 // once, up front, with [Core.For]:
 //
-//	base := zapadapter.New(downstream)
+//	base := zapadapter.NewJSON(os.Stderr, zap.NewProductionEncoderConfig())
 //	logger := zap.New(base)          // process logger, no scope
 //	ctx, done := zapadapter.Scope(r.Context())
 //	defer done()
@@ -56,7 +56,56 @@ type Core struct {
 	carrier *carrier
 }
 
+// resolve applies opts over the defaults. Shared by every constructor so the
+// option set cannot drift between them.
+func resolve(opts []Option) config {
+	cfg := newConfig()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg
+}
+
+// NewJSON returns a Core writing JSON entries to ws.
+//
+// It builds the downstream core itself, opened at the buffer floor, so the
+// caller never has to open one by hand: use this rather than [New] unless you
+// already have a downstream core to wrap. Because this package holds the only
+// reference to that core, nothing can gate it shut afterwards and the mis-wiring
+// [New] panics on cannot happen.
+//
+// encCfg is the zap encoder configuration, usually
+// zap.NewProductionEncoderConfig(). There is no default worth guessing here, so
+// unlike the slog side it is a parameter.
+func NewJSON(ws zapcore.WriteSyncer, encCfg zapcore.EncoderConfig, opts ...Option) *Core {
+	return newEncoded(zapcore.NewJSONEncoder(encCfg), ws, opts)
+}
+
+// NewConsole is [NewJSON] with zap's console encoding.
+func NewConsole(ws zapcore.WriteSyncer, encCfg zapcore.EncoderConfig, opts ...Option) *Core {
+	return newEncoded(zapcore.NewConsoleEncoder(encCfg), ws, opts)
+}
+
+// newEncoded builds a Core over a downstream this package constructs.
+//
+// The options resolve first, so the downstream core is opened at the final
+// buffer floor. No Enabled probe: it is opened at the floor by construction,
+// which is what New's probe checks for at runtime.
+func newEncoded(enc zapcore.Encoder, ws zapcore.WriteSyncer, opts []Option) *Core {
+	cfg := resolve(opts)
+	return &Core{
+		cfg:        cfg,
+		downstream: zapcore.NewCore(enc, ws, cfg.bufferFloor),
+		pool:       core.NewScopePool[core.Entry](cfg.capacity, cfg.postTripLimit),
+	}
+}
+
 // New returns a Core wrapping downstream.
+//
+// Prefer [NewJSON] or [NewConsole] unless you already have a downstream core:
+// they build one correctly opened and cannot be mis-wired.
 //
 // downstream must be constructed wide open, at or below the buffer floor:
 // dllog owns the effective level, and a downstream that filters would discard
@@ -72,17 +121,13 @@ func New(downstream zapcore.Core, opts ...Option) *Core {
 		panic("dllog/zapadapter: New called with a nil downstream core")
 	}
 
-	cfg := newConfig()
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&cfg)
-		}
-	}
+	cfg := resolve(opts)
 
 	if !downstream.Enabled(cfg.bufferFloor) {
 		panic(fmt.Sprintf(
 			"dllog/zapadapter: downstream core has %v disabled; construct it wide open "+
-				"(zapcore.NewCore(enc, ws, %v)) so replayed entries survive",
+				"(zapcore.NewCore(enc, ws, %v)) so replayed entries survive, "+
+				"or use zapadapter.NewJSON/NewConsole to have this package build it for you",
 			cfg.bufferFloor, cfg.bufferFloor))
 	}
 

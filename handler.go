@@ -3,6 +3,7 @@ package dllog
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 
 	"github.com/arhuman/dllog/internal/core"
@@ -24,7 +25,94 @@ type Handler struct {
 	pool       *core.ScopePool[core.Entry]
 }
 
+// resolve applies opts over the defaults. Shared by every constructor so the
+// option set cannot drift between them.
+func resolve(opts []Option) config {
+	cfg := newConfig()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg
+}
+
+// NewJSON returns a Handler writing JSON records to w.
+//
+// It builds the downstream handler itself, opened at the buffer floor, so the
+// caller never has to open one by hand: use this rather than [New] unless you
+// already have a downstream handler to wrap. Because dllog holds the only
+// reference to that handler, nothing can gate it shut afterwards and the
+// mis-wiring [New] panics on cannot happen.
+//
+// The effective level is still [WithLevel], defaulting to Info: NewJSON(w)
+// emits Info and above, and replays buffered Debug records when an operation
+// fails.
+func NewJSON(w io.Writer, opts ...Option) *Handler {
+	return newEncoded(slog.NewJSONHandler, w, slog.HandlerOptions{}, opts)
+}
+
+// NewText returns a Handler writing text records to w. It is [NewJSON] with
+// slog's text encoding.
+func NewText(w io.Writer, opts ...Option) *Handler {
+	return newEncoded(slog.NewTextHandler, w, slog.HandlerOptions{}, opts)
+}
+
+// NewJSONWith is [NewJSON] with control over the rest of the slog.HandlerOptions,
+// for AddSource or a ReplaceAttr hook.
+//
+// ho.Level must be nil: dllog owns the downstream level, and a caller-set level
+// is the wiring mistake this constructor exists to make impossible. NewJSONWith
+// panics rather than overriding it silently, so the conflict surfaces at startup
+// instead of becoming a question about which level won. ho is copied, so the
+// caller's struct is not modified.
+func NewJSONWith(w io.Writer, ho slog.HandlerOptions, opts ...Option) *Handler {
+	mustOwnLevel(ho, "NewJSONWith")
+	return newEncoded(slog.NewJSONHandler, w, ho, opts)
+}
+
+// NewTextWith is [NewJSONWith] with slog's text encoding.
+func NewTextWith(w io.Writer, ho slog.HandlerOptions, opts ...Option) *Handler {
+	mustOwnLevel(ho, "NewTextWith")
+	return newEncoded(slog.NewTextHandler, w, ho, opts)
+}
+
+// mustOwnLevel rejects a caller-supplied level on the *With constructors.
+func mustOwnLevel(ho slog.HandlerOptions, fn string) {
+	if ho.Level != nil {
+		panic(fmt.Sprintf(
+			"dllog: %s called with HandlerOptions.Level set (%v); dllog owns the "+
+				"downstream level, so leave it nil and pass WithLevel/WithBufferFloor instead",
+			fn, ho.Level.Level()))
+	}
+}
+
+// newEncoded builds a Handler over a downstream this package constructs with
+// encode, which is slog.NewJSONHandler or slog.NewTextHandler.
+//
+// The options resolve first, so the downstream is opened at the final buffer
+// floor, and it receives the configured Leveler rather than a resolved Level so
+// a dynamic floor keeps tracking. No Enabled probe: the downstream is opened at
+// the floor by construction, which is what New's probe checks for at runtime.
+func newEncoded[H slog.Handler](
+	encode func(io.Writer, *slog.HandlerOptions) H,
+	w io.Writer,
+	ho slog.HandlerOptions,
+	opts []Option,
+) *Handler {
+	cfg := resolve(opts)
+	ho.Level = cfg.bufferFloor
+	return &Handler{
+		cfg:        cfg,
+		downstream: encode(w, &ho),
+		pool:       core.NewScopePool[core.Entry](cfg.capacity, cfg.postTripLimit),
+	}
+}
+
 // New returns a Handler wrapping downstream.
+//
+// Prefer [NewJSON] or [NewText] unless you already have a downstream handler:
+// they build one correctly opened and cannot be mis-wired.
 //
 // downstream must be constructed wide open, at or below the buffer floor:
 // dllog owns the effective level, and a downstream that filters would discard
@@ -39,18 +127,14 @@ func New(downstream slog.Handler, opts ...Option) *Handler {
 		panic("dllog: New called with a nil downstream handler")
 	}
 
-	cfg := newConfig()
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&cfg)
-		}
-	}
+	cfg := resolve(opts)
 
 	floor := cfg.bufferFloor.Level()
 	if !downstream.Enabled(context.Background(), floor) {
 		panic(fmt.Sprintf(
 			"dllog: downstream handler has %v disabled; construct it wide open "+
-				"(slog.HandlerOptions{Level: %v}) so replayed records survive",
+				"(slog.HandlerOptions{Level: %v}) so replayed records survive, "+
+				"or use dllog.NewJSON/NewText to have dllog build it for you",
 			floor, floor))
 	}
 

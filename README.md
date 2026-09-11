@@ -16,10 +16,9 @@ records too, retroactively, with their original timestamps.
 
 ## Usage
 
-The downstream handler must be constructed at `Debug`. dllog owns the effective
-level, and a downstream that filters below the buffer floor would silently
-discard exactly the records dllog exists to deliver, so `New` panics rather than
-letting that reach production.
+`NewJSON` builds the handler and its output for you. There is nothing else to
+wire: the service logs at `Info`, and a failed operation also gets the `Debug`
+records that led to it.
 
 ```go
 package main
@@ -33,13 +32,7 @@ import (
 )
 
 func main() {
-	// Downstream wide open at Debug. dllog decides what is emitted.
-	downstream := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	})
-
-	// Effective level Info: Debug is buffered, not emitted, until something fails.
-	logger := slog.New(dllog.New(downstream, dllog.WithLevel(slog.LevelInfo)))
+	logger := slog.New(dllog.NewJSON(os.Stderr))
 	slog.SetDefault(logger)
 
 	mux := http.NewServeMux()
@@ -83,31 +76,80 @@ func process(ctx context.Context, id string) error {
 scope returns that same scope and a `done` that does nothing, so only the
 creator releases the buffer.
 
+### Choosing the output
+
+`NewText` is `NewJSON` with slog's text encoding. For `AddSource` or a
+`ReplaceAttr` hook, `NewJSONWith` and `NewTextWith` take the rest of the
+`slog.HandlerOptions`:
+
+```go
+logger := slog.New(dllog.NewJSONWith(os.Stderr, slog.HandlerOptions{
+	AddSource:   true,
+	ReplaceAttr: redact,
+	// Level stays nil: dllog owns it.
+}, dllog.WithLevel(slog.LevelWarn)))
+```
+
+`Level` must be left nil. dllog sets it from the buffer floor, and a
+caller-supplied level is refused at construction rather than silently
+overridden.
+
+### Bringing your own handler
+
+`New` wraps a handler you already have. It costs one rule: that handler must be
+constructed wide open at `Debug`, and you set the level you actually want on
+dllog instead.
+
+```go
+downstream := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+	Level: slog.LevelDebug, // wide open: dllog decides what is emitted
+})
+logger := slog.New(dllog.New(downstream, dllog.WithLevel(slog.LevelInfo)))
+```
+
+Both lines are load-bearing. dllog owns the effective level, so a downstream
+that filters below the buffer floor would discard exactly the records dllog
+exists to deliver. `New` panics when it detects that rather than letting it
+reach production, but the check can only run at construction: a downstream
+holding a `slog.Leveler` that is lowered later escapes it. The constructors
+above have no such gap, since dllog builds the handler and keeps the only
+reference to it.
+
 ## Measured cost
 
-Apple M3 Pro, `go1.26.6`, `darwin/arm64`, from `go test -bench=. -benchmem`:
+One run of `go test -bench=. -benchmem` on an Apple M3 Pro, `go1.26.6`,
+`darwin/arm64`. Treat these as magnitudes, not exact figures: the sub-microsecond
+rows move by a few percent between runs.
 
-| Path | Time | Allocations |
-|---|---|---|
-| Plain slog, Debug-open downstream | 149.2 ns/op | 0 |
-| dllog, no scope in context | 150.0 ns/op | 0 |
-| dllog, buffering inside a scope | 191.9 ns/op | 0 |
-| `Enabled`, no scope | 2.7 ns/op | 0 |
-| Full request through the middleware, 200 | 2547 ns/op | 11 |
-| Full request through the middleware, 500 | 6194 ns/op | 15 |
+| Path | Time | Bytes | Allocations |
+|---|---|---|---|
+| Plain slog, Debug-open downstream | 150.7 ns/op | 0 | 0 |
+| dllog, no scope in context | 151.6 ns/op | 0 | 0 |
+| dllog, buffering inside a scope | 239.1 ns/op | 352 | 3 |
+| `Enabled`, no scope | 6.0 ns/op | 0 | 0 |
+| Full request through the middleware, 200 | 2507 ns/op | 3635 | 37 |
+| Full request through the middleware, 500 | 5425 ns/op | 3909 | 41 |
 
-Two things are worth reading carefully.
+Three things are worth reading carefully.
 
-**Out of scope, dllog is free.** 150.0 ns against a 149.2 ns baseline is within
-run-to-run noise. The ~150 ns floor is `slog.Record` construction inside
-`slog.Logger`, which every handler pays and none can avoid.
+**Out of scope, dllog is free.** 151.6 ns against a 150.7 ns baseline is within
+run-to-run noise: repeat the benchmark and the order of those two flips. The
+~150 ns floor is the cost of building a `slog.Record` inside `slog.Logger`,
+which every handler pays and none can avoid.
+
+**Inside a scope, you pay to keep the record.** Buffering costs about 90 ns and
+three allocations more than passing the record straight through, because the
+record and its attributes have to be copied and held rather than written and
+forgotten. That is the price of having the Debug context available if the
+operation later fails.
 
 **The honest baseline is a Debug-open downstream.** A plain slog logger over an
-`Info`-gated handler costs 4.1 ns, because `slog.Logger` refuses the call before
-building a record. dllog cannot be compared to that: it must see `Debug` records
-to buffer them. Quoting the 4 ns number as the baseline would make dllog look
-36x slower, and it would be a dishonest comparison, so the table above uses the
-like-for-like one.
+`Info`-gated handler costs 4.1 ns, because `slog.Logger` sees the level is
+disabled and drops the call before building a record at all. dllog cannot be
+compared against that: it has to receive `Debug` records in order to buffer
+them. Quoting the 4 ns figure as the baseline would make dllog look 36x slower
+while comparing two different amounts of work, so the table uses the
+like-for-like number instead.
 
 Inside a scope, buffering costs about 42 ns over the baseline and allocates
 nothing in steady state, since ring buffers are recycled through a pool.
@@ -160,23 +202,34 @@ differently.
 
 ## Caveats
 
-These follow from deferred logging and are worth knowing before you rely on it.
+All four follow from the same thing: a buffered record is written now and
+formatted later. Worth reading before you rely on it.
 
-Reference values render at flush time, not at log time. If you log a map or a
-pointer and mutate it before the replay, the replayed record shows the mutated
-state. Log identifiers, or values you do not mutate.
+**A mutated value replays as it is now, not as it was.** dllog keeps your log
+arguments as you passed them and only formats them if it replays them. So if you
+log a pointer, a slice or a map and then change what it points at, the replayed
+record shows the changed value, not the value at the moment you logged it. Log
+ids and strings, or values you will not touch again.
 
-Buffered attributes stay reachable until the scope flushes or ends, bounded by
-ring capacity. Logging a large object at `Debug` keeps it alive for the duration
-of the operation.
+**Buffering keeps things alive.** A record sitting in a scope's buffer still
+holds references to whatever you logged, so the garbage collector cannot free
+it, and that lasts until the scope replays or ends. Logging a large object at
+`Debug` keeps that object in memory for the whole operation. The number of
+records is capped by `WithCapacity`, but their size is not: a bounded count of
+large objects is still large.
 
-For a handler created with `WithGroup`, the replay marker may nest inside that
-group rather than sitting at the top level. Reimplementing group logic to avoid
-this would cost more than it is worth.
+**Under `WithGroup`, the replay marker moves.** A handler built with
+`WithGroup("http")` nests everything it logs under that group name. The marker
+dllog adds on replay is written at replay time, so it lands inside the group
+alongside your attributes rather than at the top level of the record. Only the
+marker's position changes, not whether it is there. Matching slog's grouping
+rules well enough to hoist it out would cost more than the tidier output is
+worth.
 
-The package-level `Trip(ctx)` marks replayed records with the default key, since
-it holds no handler and cannot see `WithReplayKey`. If you rename the key, trip
-through the handler instead, which knows its own configuration:
+**The package-level `Trip(ctx)` always marks with `"replay"`.** It is a plain
+function with no handler to consult, so it cannot see a key you set with
+`WithReplayKey`. Trip through the handler instead, which knows its own
+configuration:
 
 ```go
 h := dllog.New(downstream, dllog.WithReplayKey("from_buffer"))
@@ -196,7 +249,8 @@ through zap replays what slog buffered on that context, and the reverse, in the
 order the entries were logged.
 
 ```go
-base := zapadapter.New(downstream) // downstream wide open at Debug, as with slog
+// Builds its own downstream core, as NewJSON does on the slog side.
+base := zapadapter.NewJSON(os.Stderr, zap.NewProductionEncoderConfig())
 logger := zap.New(base)            // process logger, no scope, plain level filter
 
 ctx, done := zapadapter.Scope(r.Context())

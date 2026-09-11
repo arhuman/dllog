@@ -14,6 +14,13 @@ This project adheres to [Semantic Versioning](https://semver.org).
   errors. The downstream handler must be constructed wide open at Debug; `New`
   panics otherwise, rather than silently discarding the records it exists to
   deliver.
+- `dllog.NewJSON(w, opts...)` and `dllog.NewText(w, opts...)` build the
+  downstream handler as well, so setting up dllog is one call and the
+  downstream cannot be gated shut. `NewJSONWith` and `NewTextWith` take the rest
+  of the `slog.HandlerOptions` for `AddSource` or a `ReplaceAttr` hook; they
+  panic if the caller also sets `Level`, which dllog owns. `zapadapter.NewJSON`
+  and `zapadapter.NewConsole` are the zap equivalents. `New` is unchanged and
+  remains the way to wrap a handler you already have.
 - `dllog.Scope(ctx)` returns a derived context and a `done` func. Scopes join
   rather than nest: opening one on a context that already carries a scope
   returns that same scope and a no-op `done`. A scope that ends without
@@ -43,12 +50,18 @@ This project adheres to [Semantic Versioning](https://semver.org).
 
 ### Notes
 
-- Memory is hard-bounded: a fixed count-based ring per scope, drop-oldest with a
-  truncation marker recording how many records were dropped. Ring buffers are
-  pooled, so scope lifecycle allocation is 112 B.
-- Unscoped Debug costs what plain slog costs over the same Debug-open downstream
-  (150.0 ns vs 149.2 ns, 0 allocations, measured on an M3 Pro).
-- Buffered values render at flush time, not at log time. Logging a mutable
-  reference and then mutating it shows the mutated state on replay. Log
-  identifiers, or values you do not mutate.
+- A scope cannot grow without limit. Each one holds a fixed number of records,
+  set by `WithCapacity`. Once it is full, the oldest record is discarded to make
+  room for the newest, and the replay says how many were lost rather than
+  hiding the gap. Buffers are reused between scopes, which costs 112 B and one
+  allocation per scope instead of 2160 B and two.
+- When no scope is open, dllog adds nothing measurable. Logging a Debug record
+  through dllog took 151.6 ns, against 150.7 ns for plain slog writing to the
+  same Debug-enabled handler. Neither allocates, and the difference is
+  run-to-run noise. Measured on an Apple M3 Pro.
+- dllog keeps your log arguments as you passed them and only formats them if it
+  replays them later. So if you log a pointer, a slice or a map and then change
+  what it points at, the replayed line shows the changed value, not the value at
+  the moment you logged it. Log ids and strings, or values you will not touch
+  again.
 - Passes `testing/slogtest.TestHandler`.
