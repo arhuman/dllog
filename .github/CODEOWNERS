@@ -1,0 +1,12 @@
+# Review routing. Every file falls to the catch-all unless a later rule wins.
+* @arhuman
+
+# The engine and the two adapters carry the invariants in CLAUDE.md: internal/
+# imports no logging library, the adapters stay peers, memory stays bounded.
+/internal/core/ @arhuman
+/zapadapter/ @arhuman
+
+# Supply chain and release surface.
+/.github/ @arhuman
+/go.mod @arhuman
+/go.sum @arhuman
