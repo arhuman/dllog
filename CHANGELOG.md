@@ -6,6 +6,8 @@ This project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-12
+
 ### Added
 
 - `dllog.New(downstream, opts...)`: a `log/slog` handler that buffers below-level
