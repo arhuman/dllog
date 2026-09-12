@@ -31,8 +31,11 @@ jobs:
           check-latest: true
       - name: Build
         run: make build
+      # fulltest, not test: `make test` is the -short red/green loop and runs no
+      # race detector, so calling it here would advertise a guarantee CI never
+      # checked. This is the gate, so it runs the gate's target.
       - name: Test (race)
-        run: make test
+        run: make fulltest
       - name: Benchmarks (smoke, 1x)
         run: go test -run='^$' -bench=. -benchmem -benchtime=1x ./...
 
