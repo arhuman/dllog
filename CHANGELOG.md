@@ -8,56 +8,39 @@ This project adheres to [Semantic Versioning](https://semver.org).
 
 ### Added
 
-- `dllog.New(downstream, opts...)`: a `log/slog` handler that buffers records
-  below the configured level inside an operation scope and replays them if the
-  operation fails. A service can run at Info and still get Debug context around
-  errors. The downstream handler must be constructed wide open at Debug; `New`
-  panics otherwise, rather than silently discarding the records it exists to
-  deliver.
+- `dllog.New(downstream, opts...)`: a `log/slog` handler that buffers below-level
+  records per operation and replays them when the operation fails, so a service
+  runs at Info and still gets Debug context around errors.
 - `dllog.NewJSON(w, opts...)` and `dllog.NewText(w, opts...)` build the
-  downstream handler as well, so setting up dllog is one call and the
-  downstream cannot be gated shut. `NewJSONWith` and `NewTextWith` take the rest
-  of the `slog.HandlerOptions` for `AddSource` or a `ReplaceAttr` hook; they
-  panic if the caller also sets `Level`, which dllog owns. `zapadapter.NewJSON`
-  and `zapadapter.NewConsole` are the zap equivalents. `New` is unchanged and
-  remains the way to wrap a handler you already have.
-- `dllog.Scope(ctx)` returns a derived context and a `done` func. Scopes join
-  rather than nest: opening one on a context that already carries a scope
-  returns that same scope and a no-op `done`. A scope that ends without
-  tripping discards its buffer.
-- `dllog.Trip(ctx)` and `(*Handler).Trip(ctx)` flush a scope explicitly, for
-  failures that are returned rather than logged. Prefer the method when the
-  handler was built with `WithReplayKey`, since it knows the configured key.
-- `dllog.Middleware()`: an HTTP middleware opening a scope per request and
-  tripping on a 5xx response or a panic. Panics are re-panicked, never
-  swallowed. Does not trip on 4xx or on context cancellation.
+  downstream handler too, so setup is one call. `NewJSONWith` and `NewTextWith`
+  add `slog.HandlerOptions` control; `zapadapter.NewJSON` and
+  `zapadapter.NewConsole` are the zap equivalents.
+- `dllog.Scope(ctx)`: a per-operation buffering scope, released by the returned
+  `done`. Scopes join rather than nest, and a clean end discards the buffer.
+- `dllog.Trip(ctx)` and `(*Handler).Trip(ctx)`: explicit flush for failures that
+  are returned rather than logged.
+- `dllog.Middleware()`: a scope per HTTP request, tripped by a 5xx response or a
+  panic.
 - Six handler options: `WithLevel`, `WithBufferFloor`, `WithTripLevel`,
   `WithCapacity`, `WithPostTripLimit`, `WithReplayKey`. Two middleware options:
   `WithLogger`, `WithTripOn`.
-- `zapadapter`: a `zapcore.Core` driven by the same engine. A scope is shared
-  across adapters, so an Error logged through zap replays what slog buffered on
-  that context, and the reverse, in log order. Because `zapcore.Core` receives
-  no context, the scope is bound once via `Core.For(ctx)` and the caller carries
-  the derived logger. `zap` is imported only by that package.
+- `zapadapter`: a `zapcore.Core` on the same engine. A scope opened by either
+  adapter is shared, so a trip through one replays what both buffered, in log
+  order.
 
 ### Fixed
 
 - Records at or above the effective level are now emitted immediately inside a
-  scope. They were buffered together with everything below the trip level, so a
-  scope that ended cleanly discarded them: a service logging at Info lost its
-  Info and Warn records on every successful request. After a trip they draw on
-  the same post-trip budget as every other record.
-- The three levels are validated at construction: every constructor panics
-  unless buffer floor <= level <= trip level holds, instead of accepting a
-  configuration that could never buffer and replay.
+  scope, instead of being buffered and lost when the scope ended cleanly: a
+  service logging at Info no longer loses Info records on successful requests.
+- Constructors panic on out-of-order levels (buffer floor <= level <= trip
+  level must hold) instead of accepting a configuration that can never replay.
 
 ### Security
 
-- The middleware's anchor record now logs the matched route pattern
-  (`GET /users/{id}`) instead of the raw URL path. Path segments routinely carry
-  user ids, reset tokens and api keys, and the anchor is emitted on the failure
-  path where logs are most likely to be exported and retained. Requests with no
-  pattern fall back to the raw path; `WithAnchorPath` overrides the derivation.
+- The middleware's anchor record logs the matched route pattern
+  (`GET /users/{id}`) instead of the raw URL path, which routinely carries user
+  ids and tokens. `WithAnchorPath` overrides the derivation.
 
 ### Notes
 
