@@ -22,7 +22,7 @@ jobs:
       fail-fast: false
       matrix:
         # Floor = the go.mod minimum; "stable" = latest release.
-        go: ["1.25", "stable"]
+        go: ["1.24", "stable"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -47,7 +47,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           # The pinned golangci-lint needs Go >= 1.26 to install, so this cannot
-          # follow go.mod's 1.25 floor: with GOTOOLCHAIN=local the install fails
+          # follow go.mod's 1.24 floor: with GOTOOLCHAIN=local the install fails
           # outright. Pinned rather than `stable` because the pinned linter's
           # staticcheck must understand this toolchain's stdlib, and a newer Go
           # than it knows panics it. Raise both together, or raise the go.mod

@@ -46,7 +46,7 @@ why nobody leaves this on.</td>
 go get github.com/arhuman/dllog
 ```
 
-Requires Go 1.25 or later. The root package has no dependencies: `zap` is
+Requires Go 1.24 or later. The root package has no dependencies: `zap` is
 optional and imported only by `zapadapter`.
 
 ## Usage

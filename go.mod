@@ -1,6 +1,6 @@
 module github.com/arhuman/dllog
 
-go 1.25
+go 1.24
 
 require go.uber.org/zap v1.28.0
 

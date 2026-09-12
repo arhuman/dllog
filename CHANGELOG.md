@@ -47,4 +47,5 @@ This project adheres to [Semantic Versioning](https://semver.org).
   record through the same handler, zero allocations (M3 Pro).
 - Buffered values are formatted at replay, not at log time; see the README
   caveats before logging mutable references.
+- Requires Go 1.24 or later.
 - Passes `testing/slogtest.TestHandler`.
