@@ -63,8 +63,10 @@ clean:
 	rm -f coverage.out
 
 ## cover: run tests with coverage and fail below COVER_MIN
+# examples/ is illustrative code with no tests by design; counting it would
+# measure the demo rather than the library.
 cover:
-	go test -covermode=atomic -coverprofile=coverage.out ./...
+	go test -covermode=atomic -coverprofile=coverage.out $$(go list ./... | grep -v '/examples/')
 	@go tool cover -func=coverage.out | awk '/^total:/ {print "coverage: " $$3}'
 	@total=$$(go tool cover -func=coverage.out | awk '/^total:/ {print $$3}' | tr -d '%'); \
 	awk -v t="$$total" -v min="$(COVER_MIN)" 'BEGIN { if (t+0 < min+0) { printf "FAIL: coverage %.1f%% < %d%%\n", t, min; exit 1 } }'
