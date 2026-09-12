@@ -7,10 +7,13 @@
 
 Every Go service faces the same choice: `Debug` floods production, `Info` hides
 the context that explains an error. dllog breaks that trade-off per operation.
-It is a `log/slog` handler that buffers below-level records in a bounded
-per-operation ring, so a successful operation stays as quiet as plain slog while
-a failed one replays the `Debug` records that led to it, with their original
-timestamps.
+It buffers below-level records in a bounded per-operation ring, so a successful
+operation stays as quiet as your logger at Info while a failed one replays the
+`Debug` records that led to it, with their original timestamps.
+
+dllog is not a logging library and does not replace yours: it plugs into the
+one you already use. It works with `log/slog` and `zap` today, even mixed in
+the same service, and other libraries can be supported the same way.
 
 ## The same failure, three ways
 
