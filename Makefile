@@ -15,7 +15,7 @@ GOVULNCHECK_VERSION ?= v1.1.4
 # ==================================================================================== #
 # PHONY DECLARATIONS (in alphabetical order)
 # ==================================================================================== #
-.PHONY: audit bench build checkcore checklen checkpromotion ci clean cover fulltest help release test tidy tools
+.PHONY: audit bench build checkcore checklen checkpromotion ci clean cover demo-gif fulltest help release test tidy tools
 
 # ==================================================================================== #
 # STANDARD TARGETS (in alphabetical order)
@@ -68,6 +68,12 @@ cover:
 	@go tool cover -func=coverage.out | awk '/^total:/ {print "coverage: " $$3}'
 	@total=$$(go tool cover -func=coverage.out | awk '/^total:/ {print $$3}' | tr -d '%'); \
 	awk -v t="$$total" -v min="$(COVER_MIN)" 'BEGIN { if (t+0 < min+0) { printf "FAIL: coverage %.1f%% < %d%%\n", t, min; exit 1 } }'
+
+## demo-gif: re-record the three README comparison GIFs (needs charmbracelet/vhs)
+demo-gif:
+	@which vhs > /dev/null || { echo "demo-gif needs vhs: brew install vhs"; exit 1; }
+	go build -o bin/demo ./examples/demo
+	@for m in info dllog debug; do vhs scripts/demo/$$m.tape; done
 
 ## fulltest: every test the repo owns, with race and coverage. The phase-closing gate.
 fulltest:

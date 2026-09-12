@@ -42,8 +42,10 @@ and in CI (commitlint on PRs).
 3. Keep the invariants: `internal/` imports no logging library, the two adapters
    stay peers (neither imports the other), and memory stays hard-bounded. The
    first two are enforced by `make checkcore` and `make checkpromotion`.
-4. Changing a benchmark figure in `README.md` means re-running `make bench` and
-   quoting the new run, not adjusting the old number.
+4. Changing a benchmark figure in `docs/performance.md` means re-running
+   `make bench` and quoting the new run, not adjusting the old number. The
+   README's Cost section summarises those figures, so update it in the same
+   pass.
 
 ## Releasing
 
