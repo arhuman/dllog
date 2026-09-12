@@ -41,6 +41,8 @@ This project adheres to [Semantic Versioning](https://semver.org).
   sampler, tee or routing core governs replayed and live entries alike.
 - The zap adapter drops a below-level entry that races the scope's release
   instead of writing it, matching the slog handler.
+- A downstream write failure in the zap adapter is reported to stderr instead
+  of vanishing silently.
 
 ### Changed
 

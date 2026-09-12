@@ -27,6 +27,7 @@ package zapadapter
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 
 	"go.uber.org/zap/zapcore"
@@ -307,8 +308,11 @@ func (c *Core) suppressed() bool {
 // which is the downstream's decision to make.
 //
 // CheckedEntry.Write reports no error, so a downstream write failure cannot be
-// propagated from here; zap reports it on the entry's own ErrorOutput. The nil
-// return keeps the signature this package's callers already expect.
+// propagated from here. A CheckedEntry built outside a zap.Logger also has no
+// ErrorOutput of its own, so without the assignment below the failure would
+// vanish silently; instead it is reported to internalErrorOutput, stderr by
+// default, which is where zap reports its own internal errors. The nil return
+// keeps the signature this package's callers already expect.
 //
 // The CheckedEntry is built here and written once: zap pools them and marks
 // them dirty on Write, so one can never be held across the buffer window and
@@ -318,9 +322,17 @@ func writeChecked(downstream zapcore.Core, ent zapcore.Entry, fields []zapcore.F
 	if ce == nil {
 		return nil
 	}
+	ce.ErrorOutput = internalErrorOutput
 	ce.Write(fields...)
 	return nil
 }
+
+// internalErrorOutput receives downstream write failures, which CheckedEntry
+// reports as text rather than returning. Stderr matches zap's own default for
+// internal errors (a zap.Logger without an ErrorOutput option does the same),
+// so a failing sink stays visible without any configuration. Tests swap it to
+// observe the report.
+var internalErrorOutput zapcore.WriteSyncer = zapcore.Lock(os.Stderr)
 
 // With returns a Core whose entries carry fields, sharing this Core's
 // configuration, scope binding and pool.
