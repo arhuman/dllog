@@ -162,23 +162,33 @@ func New(downstream slog.Handler, opts ...Option) *Handler {
 }
 
 // Enabled reports whether a record at level should be produced. It is the cost
-// model of the package, in three branches:
+// model of the package, in three ordered checks:
 //
-//   - No scope on ctx: the downstream handler decides, so an out-of-scope Debug
-//     call stays the near-free no-op it would be without dllog.
-//   - Scope present, not yet tripped: true from the buffer floor up, because
-//     those records are candidates for the buffer.
-//   - Scope present, tripped: true from the buffer floor up, because they now
-//     pass straight through.
+//   - At or above the effective level: true, in a scope or out of one. Handle
+//     may still drop the record when a tripped scope's post-trip budget is
+//     spent; Enabled overreporting there is the slog contract's cheap side.
+//   - Below the buffer floor: false, everywhere. Nothing keeps such a record.
+//   - In between, the buffer band: true exactly when ctx carries a live scope,
+//     because only a scope has somewhere to put it.
 //
-// The last two coincide today; they are kept distinct because they answer
-// different questions and only the tripped branch is bounded by the post-trip
-// limit, which Handle applies.
+// The downstream is never consulted. It is deliberately constructed wide open
+// (New requires it, so replayed records survive), which makes its answer
+// useless as a gate: delegating to it made every out-of-scope call in the
+// buffer band build a full record that Handle then threw away. Answering from
+// the handler's own levels lets slog refuse those calls before the record
+// exists, which is what keeps an out-of-scope Debug near the cost of a
+// disabled slog call.
+//
+// The level checks come first so the common out-of-band calls never pay the
+// context lookup; only the buffer band needs to know whether a scope is there.
 func (h *Handler) Enabled(ctx context.Context, level slog.Level) bool {
-	if fromContext(ctx) == nil {
-		return h.downstream.Enabled(ctx, level)
+	if level >= h.cfg.level.Level() {
+		return true
 	}
-	return level >= h.cfg.bufferFloor.Level()
+	if level < h.cfg.bufferFloor.Level() {
+		return false
+	}
+	return fromContext(ctx) != nil
 }
 
 // Handle buffers, replays, or forwards r according to the scope on ctx.
@@ -200,11 +210,8 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	}
 
 	if r.Level >= h.cfg.tripLevel.Level() {
-		// markTripped both flushes an existing ring and records the trip when
-		// there is no ring yet, so records logged after this failure pass
-		// through either way.
-		if s := c.MarkTripped(); s != nil {
-			flush(s)
+		if h.tripAndSuppress(c) {
+			return nil
 		}
 		return h.downstream.Handle(ctx, r)
 	}
@@ -216,13 +223,20 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	// everything else. A trip racing this check can let one record through
 	// unbudgeted; that record was emittable either way.
 	if r.Level >= h.cfg.level.Level() {
-		if c.Tripped() && c.bind(h.pool).PassThrough() == core.ActionSuppressed {
+		if c.Tripped() && h.suppressed(c) {
 			return nil
 		}
 		return h.downstream.Handle(ctx, r)
 	}
 
-	switch s := c.bind(h.pool); s.Append(slot{record: r.Clone(), downstream: h.downstream, replayKey: h.cfg.replayKey}) {
+	s := c.bind(h.pool)
+	if s == nil {
+		// The scope was released between fromContext and here, so this record
+		// belongs to no live scope: a below-level record without a scope is
+		// dropped by the level.
+		return nil
+	}
+	switch s.Append(&slot{record: r.Clone(), downstream: h.downstream, replayKey: h.cfg.replayKey}) {
 	case core.ActionBuffered:
 		return nil
 	case core.ActionSuppressed:
@@ -230,6 +244,39 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	default:
 		return h.downstream.Handle(ctx, r)
 	}
+}
+
+// tripAndSuppress trips the scope for a record at or above the trip level and
+// reports whether that record must be dropped rather than emitted.
+//
+// MarkTripped both flushes an existing ring and records the trip when there is
+// no ring yet, so records logged after this failure pass through either way.
+// Whichever branch applies, exactly one call is the one that moved the scope
+// into the tripped state.
+//
+// That record is the trigger and is never suppressed: it is the error line the
+// replayed batch hangs from, and dropping it would leave a pile of Debug records
+// with nothing explaining them. Every trip-level record after it draws on the
+// post-trip budget like anything else, because an error storm following the
+// failure is exactly what that budget exists to bound.
+func (h *Handler) tripAndSuppress(c *carrier) bool {
+	s, trigger := c.MarkTripped()
+	if s != nil {
+		trigger = flush(s)
+	}
+	return !trigger && h.suppressed(c)
+}
+
+// suppressed reports whether a record the handler is about to emit must be
+// dropped instead, because the scope has tripped and its post-trip budget is
+// spent. It is the one place that budget is charged for a record the buffer
+// never held.
+//
+// A released scope suppresses nothing: with no ring there is no budget to spend,
+// and the record is governed by the level alone.
+func (h *Handler) suppressed(c *carrier) bool {
+	ring := c.bind(h.pool)
+	return ring != nil && ring.PassThrough() == core.ActionSuppressed
 }
 
 // WithAttrs returns a Handler whose records carry attrs, sharing this Handler's

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -380,12 +381,16 @@ func TestPostTripLimitBoundsPassThrough(t *testing.T) {
 func TestEnabledBranches(t *testing.T) {
 	base := zapadapter.New(newZapSink(&sink{}), zapadapter.WithBufferFloor(zapcore.DebugLevel))
 
-	t.Run("no scope delegates to downstream", func(t *testing.T) {
-		// The sink is wide open, so every level is enabled: the branch is
-		// proven by the fact that a level below the buffer floor is still
-		// enabled, which only the delegating branch can produce.
-		if !base.Enabled(zapcore.DebugLevel) {
-			t.Fatal("unbound Enabled(Debug) = false, want the downstream's answer (true)")
+	t.Run("no scope gates at the effective level", func(t *testing.T) {
+		// The sink is wide open, so a delegating Enabled would answer true for
+		// Debug and zap would build a CheckedEntry that Write throws away. The
+		// Core answers from its own level instead: below it refused, at or
+		// above it produced.
+		if base.Enabled(zapcore.DebugLevel) {
+			t.Fatal("unbound Enabled(Debug) = true, want false: the effective level decides, not the wide-open downstream")
+		}
+		if !base.Enabled(zapcore.InfoLevel) {
+			t.Fatal("unbound Enabled(Info) = false, want true")
 		}
 	})
 
@@ -610,5 +615,177 @@ func TestConcurrentForOnOneContext(t *testing.T) {
 	if got := len(s.messages()); got != n {
 		t.Fatalf("replayed %d entries, want %d: concurrent For calls must all bind "+
 			"the same ring", got, n)
+	}
+}
+
+// countingCore records how often Check and Write were called, so a test can
+// prove the adapter routes emission through the downstream's Check rather than
+// calling its Write directly. Everything a real core does in Check (sampling,
+// tee fan-out, conditional routing) is skipped by a direct Write.
+type countingCore struct {
+	mu     sync.Mutex
+	checks int
+	writes int
+	sink   *sink
+}
+
+func (c *countingCore) Enabled(zapcore.Level) bool { return true }
+
+func (c *countingCore) With([]zapcore.Field) zapcore.Core { return c }
+
+func (c *countingCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	c.mu.Lock()
+	c.checks++
+	c.mu.Unlock()
+	return ce.AddCore(ent, c)
+}
+
+func (c *countingCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
+	c.mu.Lock()
+	c.writes++
+	c.mu.Unlock()
+	c.sink.add(render(ent.Message, fields))
+	return nil
+}
+
+func (c *countingCore) Sync() error { return nil }
+
+func (c *countingCore) counts() (checks, writes int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.checks, c.writes
+}
+
+// Every entry the adapter emits must reach the downstream through its Check.
+// New accepts an arbitrary zapcore.Core, so a downstream whose behaviour lives
+// in Check is a legal wiring, not an exotic one.
+func TestEmissionRoutesThroughDownstreamCheck(t *testing.T) {
+	tests := []struct {
+		name string
+		log  func(ctx context.Context, logger *zap.Logger)
+	}{
+		{
+			name: "unbound above level",
+			log: func(_ context.Context, logger *zap.Logger) {
+				logger.Info("plain")
+			},
+		},
+		{
+			name: "replayed from the buffer",
+			log: func(_ context.Context, logger *zap.Logger) {
+				logger.Debug("buffered")
+				logger.Error("boom")
+			},
+		},
+		{
+			name: "at level inside a scope",
+			log: func(_ context.Context, logger *zap.Logger) {
+				logger.Info("in scope")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			down := &countingCore{sink: &sink{}}
+			base := zapadapter.New(down, zapadapter.WithLevel(zapcore.InfoLevel))
+
+			ctx, done := zapadapter.Scope(context.Background())
+			defer done()
+
+			tt.log(ctx, zap.New(base.For(ctx)))
+
+			checks, writes := down.counts()
+			if writes == 0 {
+				t.Fatal("nothing reached the downstream")
+			}
+			if checks != writes {
+				t.Fatalf("downstream checks = %d, writes = %d: every write must be preceded by its own Check", checks, writes)
+			}
+		})
+	}
+}
+
+// The eviction notice is emitted by the adapter itself rather than by a caller,
+// so it is the path most likely to keep bypassing Check after the others are
+// fixed.
+func TestDroppedNoticeRoutesThroughDownstreamCheck(t *testing.T) {
+	down := &countingCore{sink: &sink{}}
+	base := zapadapter.New(down,
+		zapadapter.WithLevel(zapcore.InfoLevel),
+		zapadapter.WithCapacity(1),
+	)
+
+	ctx, done := zapadapter.Scope(context.Background())
+	defer done()
+
+	logger := zap.New(base.For(ctx))
+	logger.Debug("first")
+	logger.Debug("second") // evicts "first"
+	logger.Error("boom")
+
+	checks, writes := down.counts()
+	if checks != writes {
+		t.Fatalf("downstream checks = %d, writes = %d: the dropped notice must go through Check too", checks, writes)
+	}
+}
+
+// A sampler implements its whole contract in Check and inherits an unsampled
+// Write, so an adapter that calls Write directly silently disables sampling.
+func TestDownstreamSamplerIsHonoured(t *testing.T) {
+	s := &sink{}
+	sampled := zapcore.NewSamplerWithOptions(newZapSink(s), time.Minute, 1, 0)
+	base := zapadapter.New(sampled, zapadapter.WithLevel(zapcore.InfoLevel))
+
+	logger := zap.New(base)
+	for range 5 {
+		logger.Info("repeated")
+	}
+
+	if got := len(s.messages()); got != 1 {
+		t.Fatalf("downstream received %d entries, want 1: the sampler's first-1-thereafter-0 policy must apply", got)
+	}
+}
+
+// The zap adapter must bound a post-trip error storm exactly as the slog
+// handler does; the two adapters are peers and cannot differ on what an option
+// means.
+func TestPostTripLimitBoundsTripLevelEntries(t *testing.T) {
+	s := &sink{}
+	base := zapadapter.New(newZapSink(s),
+		zapadapter.WithLevel(zapcore.InfoLevel),
+		zapadapter.WithPostTripLimit(1),
+	)
+
+	ctx, done := zapadapter.Scope(context.Background())
+	defer done()
+
+	logger := zap.New(base.For(ctx))
+	logger.Debug("seed")
+	logger.Error("trigger") // trips, exempt from the budget
+	logger.Error("second")  // spends the budget
+	logger.Error("third")   // suppressed
+
+	want := []string{"seed[replay]", "trigger", "second"}
+	if got := s.messages(); !equal(got, want) {
+		t.Fatalf("messages = %v, want %v: errors after the trip must draw on the post-trip budget", got, want)
+	}
+}
+
+// A released scope makes a bound Core behave as an unbound one: the entry is
+// governed by the configured level, not buffered into a scope that is gone.
+func TestReleasedScopeFiltersLateEntries(t *testing.T) {
+	s := &sink{}
+	base := zapadapter.New(newZapSink(s), zapadapter.WithLevel(zapcore.InfoLevel))
+
+	ctx, done := zapadapter.Scope(context.Background())
+	logger := zap.New(base.For(ctx))
+	logger.Debug("buffered")
+	done()
+
+	logger.Debug("late")
+
+	if got := s.messages(); len(got) != 0 {
+		t.Fatalf("messages = %v, want none: an entry logged after done() must be filtered, not written", got)
 	}
 }

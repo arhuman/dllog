@@ -209,7 +209,7 @@ func TestConcurrentAppendTripCloseAccounting(t *testing.T) {
 // TestConcurrentAppendCloseWithoutTripAccounting covers the bucket the tripping
 // test cannot reach: entries that are buffered and then discarded by Close
 // because the scope never tripped (DESIGN.md section 2). Every append must be
-// either buffered (held or evicted) or, once Close lands, passed through.
+// either buffered (held or evicted) or, once Close lands, suppressed.
 //
 // The reconciliation here pins the ring itself: at the moment of Close the ring
 // held exactly buffered-dropped entries, and that must equal the capacity once
@@ -229,27 +229,29 @@ func TestConcurrentAppendCloseWithoutTripAccounting(t *testing.T) {
 			start = make(chan struct{})
 			mu    sync.Mutex
 			buf   int
-			pass  int
+			supp  int
 		)
 		for g := range producers {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				<-start
-				lb, lp := 0, 0
+				lb, ls := 0, 0
 				for i := range perProducer {
 					switch a := s.Append(entryID{g, i}); a {
 					case ActionBuffered:
 						lb++
-					case ActionPassThrough:
-						lp++
+					case ActionSuppressed:
+						// The scope closed mid-run: an untripped, closed scope
+						// suppresses what it is offered.
+						ls++
 					default:
 						t.Errorf("run %d: untripped Append returned %v", run, a)
 					}
 				}
 				mu.Lock()
 				buf += lb
-				pass += lp
+				supp += ls
 				mu.Unlock()
 			}()
 		}
@@ -267,9 +269,9 @@ func TestConcurrentAppendCloseWithoutTripAccounting(t *testing.T) {
 		wg.Wait()
 
 		dropped := s.Dropped()
-		if total, want := buf+pass, producers*perProducer; total != want {
-			t.Fatalf("run %d: accounting FAILED: buffered=%d + passed=%d = %d, want %d",
-				run, buf, pass, total, want)
+		if total, want := buf+supp, producers*perProducer; total != want {
+			t.Fatalf("run %d: accounting FAILED: buffered=%d + suppressed=%d = %d, want %d",
+				run, buf, supp, total, want)
 		}
 		// Everything buffered was either evicted or discarded by Close; nothing
 		// may go unaccounted, and nothing may be counted twice.
@@ -425,8 +427,8 @@ func TestConcurrentCloseIsIdempotent(t *testing.T) {
 		close(start)
 		wg.Wait()
 
-		if got := s.Append(entryID{0, 2}); got != ActionPassThrough {
-			t.Fatalf("Append() after concurrent Close() = %v, want ActionPassThrough", got)
+		if got := s.Append(entryID{0, 2}); got != ActionSuppressed {
+			t.Fatalf("Append() after concurrent Close() = %v, want ActionSuppressed", got)
 		}
 	}
 }
@@ -630,6 +632,66 @@ func TestConcurrentAppendTripCloseAllRacing(t *testing.T) {
 			if id.goroutine < 0 || id.goroutine >= producers || id.seq < 0 || id.seq >= perProducer {
 				t.Fatalf("run %d: entry %s FABRICATED: never appended by any producer", run, id)
 			}
+		}
+	}
+}
+
+// TestConcurrentCarrierBindMarkTripClose hammers the carrier's lock-free read
+// paths against its mutex-guarded transitions: many goroutines race Bind and
+// MarkTripped while one closes. The invariants: every non-nil Bind result is
+// the same scope, MarkTripped's transition claim is granted at most once per
+// carrier, and nothing panics or deadlocks whichever interleaving wins.
+func TestConcurrentCarrierBindMarkTripClose(t *testing.T) {
+	const goroutines = 12
+
+	for range 50 {
+		c := &Carrier{}
+		pool := NewScopePool[Entry](8, 0)
+
+		var (
+			wg     sync.WaitGroup
+			start  = make(chan struct{})
+			mu     sync.Mutex
+			scopes = map[*Scope[Entry]]bool{}
+			firsts int
+		)
+		for g := range goroutines {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				switch g % 3 {
+				case 0:
+					if s := c.Bind(pool); s != nil {
+						mu.Lock()
+						scopes[s] = true
+						mu.Unlock()
+					}
+				case 1:
+					if _, first := c.MarkTripped(); first {
+						mu.Lock()
+						firsts++
+						mu.Unlock()
+					}
+				default:
+					c.Close()
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		if len(scopes) > 1 {
+			t.Fatalf("Bind handed out %d distinct scopes, want at most one", len(scopes))
+		}
+		if firsts > 1 {
+			t.Fatalf("MarkTripped granted the transition %d times, want at most once", firsts)
+		}
+		if !c.Closed() {
+			t.Fatal("Closed() = false after Close ran")
+		}
+		if c.Bind(pool) != nil {
+			t.Fatal("Bind returned a scope on a closed carrier")
 		}
 	}
 }

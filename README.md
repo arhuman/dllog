@@ -135,9 +135,10 @@ creator releases the buffer.
 
 ## Cost
 
-Outside a scope, dllog is free: 151.6 ns/op against a 150.7 ns/op plain-slog
-baseline, zero allocations, which is run-to-run noise apart. Inside a scope,
-buffering a record costs about 90 ns and three allocations, the price of having
+Outside a scope, a Debug call costs 8.9 ns/op and zero allocations against the
+4.0 ns/op of a plain slog logger configured at Info: the record is refused
+before it is built, and the difference is one context lookup. Inside a scope,
+buffering a record costs about 200 ns and one allocation, the price of having
 it available if the operation later fails.
 
 Memory is hard-bounded by construction: `capacity x record size x live scopes`,

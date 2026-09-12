@@ -1,6 +1,7 @@
 package dllog
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"sync"
@@ -256,6 +257,13 @@ func newFakeAdapter() *fakeAdapter {
 	return &fakeAdapter{pool: core.NewScopePool[core.Entry](64, 0)}
 }
 
+// fnEntry implements core.Entry with a bare emit thunk, for tests that drive
+// the shared ring directly without going through a Handler.
+type fnEntry struct{ emit func() }
+
+func (e *fnEntry) Emit()      { e.emit() }
+func (e *fnEntry) Notify(int) {}
+
 // log buffers msg into whatever scope ctx carries, or emits it immediately when
 // there is none. It mirrors what this package's Handle does, in miniature.
 func (f *fakeAdapter) log(ctx context.Context, msg string) {
@@ -264,7 +272,7 @@ func (f *fakeAdapter) log(ctx context.Context, msg string) {
 		f.emit(msg)
 		return
 	}
-	entry := core.Entry{Emit: func() { f.emit("replayed:" + msg) }}
+	entry := &fnEntry{emit: func() { f.emit("replayed:" + msg) }}
 	if c.Bind(f.pool).Append(entry) == core.ActionPassThrough {
 		f.emit(msg)
 	}
@@ -349,7 +357,7 @@ func TestCrossAdapterReplayIsGloballyOrdered(t *testing.T) {
 	// Route the fake's emissions into the shared sink.
 	fakeLog := func(ctx context.Context, msg string) {
 		c := core.FromContext(ctx)
-		entry := core.Entry{Emit: func() { record(msg) }}
+		entry := &fnEntry{emit: func() { record(msg) }}
 		if c.Bind(fake.pool).Append(entry) == core.ActionPassThrough {
 			record(msg)
 		}
@@ -388,3 +396,100 @@ func (h *fnHandler) Handle(_ context.Context, r slog.Record) error {
 }
 func (h *fnHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *fnHandler) WithGroup(string) slog.Handler      { return h }
+
+// A context outlives the scope it carried, so a record logged on it after done()
+// must behave exactly as one logged with no scope at all: filtered by the
+// configured level, not emitted, and not buffered.
+//
+// Before the carrier learned to stay closed, the released scope's Append
+// answered ActionPassThrough and the handler emitted the record, so a Debug
+// escaped to the downstream long after its operation ended.
+func TestReleasedScopeFiltersLateRecords(t *testing.T) {
+	c := &capture{}
+	log := slog.New(New(c, WithLevel(slog.LevelInfo)))
+
+	ctx, done := Scope(context.Background())
+	log.DebugContext(ctx, "buffered")
+	done()
+
+	log.DebugContext(ctx, "late")
+
+	if got := c.messages(); len(got) != 0 {
+		t.Fatalf("messages = %v, want none: a record logged after done() must be filtered, not emitted", got)
+	}
+}
+
+// Enabled must agree with Handle: once the scope is released the carrier is
+// still on the context, and reporting the buffer floor enabled would keep slog
+// building records the handler then throws away.
+func TestReleasedScopeReportsDownstreamEnabled(t *testing.T) {
+	// A downstream that really gates on level, so the assertion is about which
+	// branch Enabled takes rather than about a permissive test double.
+	var buf bytes.Buffer
+	h := New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}),
+		WithLevel(slog.LevelInfo), WithBufferFloor(slog.LevelInfo))
+
+	ctx, done := Scope(context.Background())
+
+	if !h.Enabled(ctx, slog.LevelInfo) {
+		t.Fatal("Enabled(Info) inside a live scope = false, want true")
+	}
+
+	done()
+
+	if h.Enabled(ctx, slog.LevelDebug) {
+		t.Fatal("Enabled(Debug) on a released scope = true, want false: it must fall back to the downstream's own level")
+	}
+}
+
+// A scope released before anything was buffered must not allocate a ring for a
+// late record. That ring would come from the pool and never be returned to it,
+// since the done that would have closed it has already run.
+func TestReleasedScopeBindsNoRing(t *testing.T) {
+	log := slog.New(New(&capture{}, WithLevel(slog.LevelInfo)))
+
+	ctx, done := Scope(context.Background())
+	done()
+
+	log.DebugContext(ctx, "late")
+
+	// A released context reports no carrier at all, so the record took the
+	// unscoped path and no ring was ever requested from the pool.
+	if fromContext(ctx) != nil {
+		t.Fatal("a released context still reports a live carrier")
+	}
+	if s := core.FromContext(ctx).Bound(); s != nil {
+		t.Fatal("a record logged after done() bound a ring, which nothing will ever return to the pool")
+	}
+}
+
+// Releasing a scope while another goroutine is still logging on its context is
+// a real shutdown race, not a contrived one. It must stay race-free and must
+// never emit a below-level record.
+func TestReleasedScopeRaceWithLateLogger(t *testing.T) {
+	c := &capture{}
+	log := slog.New(New(c, WithLevel(slog.LevelInfo)))
+
+	ctx, done := Scope(context.Background())
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				log.DebugContext(ctx, "concurrent")
+			}
+		}()
+	}
+	done()
+	wg.Wait()
+
+	// Whatever raced through was buffered and discarded with the scope; nothing
+	// below the level may reach the downstream.
+	for _, r := range c.snapshot() {
+		if r.Level < slog.LevelInfo {
+			t.Fatalf("a below-level record reached the downstream during shutdown: %v", r.Message)
+		}
+	}
+}

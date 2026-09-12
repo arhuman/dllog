@@ -4,40 +4,41 @@
 
 One run of `go test -bench=. -benchmem` on an Apple M3 Pro, `go1.26.6`,
 `darwin/arm64`. Treat these as magnitudes, not exact figures: the sub-microsecond
-rows move by a few percent between runs.
+rows move by a few percent between runs. This table is the single source of
+truth; the prose below explains it and quotes no other numbers.
 
 | Path | Time | Bytes | Allocations |
 |---|---|---|---|
-| Plain slog, Debug-open downstream | 150.7 ns/op | 0 | 0 |
-| dllog, no scope in context | 151.6 ns/op | 0 | 0 |
-| dllog, buffering inside a scope | 239.1 ns/op | 352 | 3 |
-| `Enabled`, no scope | 6.0 ns/op | 0 | 0 |
-| Full request through the middleware, 200 | 2507 ns/op | 3635 | 37 |
-| Full request through the middleware, 500 | 5425 ns/op | 3909 | 41 |
+| Plain slog, Info-gated handler, Debug call | 4.0 ns/op | 0 | 0 |
+| dllog, no scope in context, Debug call | 8.9 ns/op | 0 | 0 |
+| Plain slog, Debug-open downstream, Debug call | 149.4 ns/op | 0 | 0 |
+| dllog, buffering inside a scope | 202.0 ns/op | 320 | 1 |
+| `Enabled`, no scope | 6.4 ns/op | 0 | 0 |
+| Full request through the middleware, 200 | 2093 ns/op | 3378 | 21 |
+| Full request through the middleware, 500 | 4753 ns/op | 3653 | 25 |
 
 Three things are worth reading carefully.
 
-**Out of scope, dllog is free.** 151.6 ns against a 150.7 ns baseline is within
-run-to-run noise: repeat the benchmark and the order of those two flips. The
-~150 ns floor is the cost of building a `slog.Record` inside `slog.Logger`,
-which every handler pays and none can avoid.
+**Out of scope, dllog costs a few nanoseconds over a disabled call.** The
+honest baseline is the first row: a production service configured at Info,
+where `slog.Logger` sees Debug disabled and drops the call before building a
+record. dllog's `Enabled` answers from its own levels, so an out-of-scope Debug
+is refused the same way; the difference between 8.9 ns and 4.0 ns is one
+context lookup, paid only for levels between the buffer floor and the effective
+level. The 149 ns third row is what rendering Debug everywhere costs; dllog
+does not pay it, and neither does the caller.
 
-**Inside a scope, you pay to keep the record.** Buffering costs about 90 ns and
-three allocations more than passing the record straight through, because the
-record and its attributes have to be copied and held rather than written and
-forgotten. That is the price of having the Debug context available if the
-operation later fails.
+**Inside a scope, you pay to keep the record.** Buffering costs about 200 ns
+and one allocation: the record and its attributes are cloned into a ring slot
+and held rather than written and forgotten. That is the price of having the
+Debug context available if the operation later fails. The ring arrays
+themselves are recycled through a pool, so scope churn does not grow the heap;
+the per-record slot is the one allocation that remains.
 
-**The honest baseline is a Debug-open downstream.** A plain slog logger over an
-`Info`-gated handler costs 4.1 ns, because `slog.Logger` sees the level is
-disabled and drops the call before building a record at all. dllog cannot be
-compared against that: it has to receive `Debug` records in order to buffer
-them. Quoting the 4 ns figure as the baseline would make dllog look 36x slower
-while comparing two different amounts of work, so the table uses the
-like-for-like number instead.
-
-Inside a scope, buffering costs about 42 ns over the baseline and allocates
-nothing in steady state, since ring buffers are recycled through a pool.
+**A failure costs microseconds, once.** The middleware rows bracket the range:
+a clean request pays scope setup and teardown, a failing one additionally
+replays its buffer through the real encoder. Both are request-scale numbers,
+paid per request rather than per record.
 
 ## Memory
 

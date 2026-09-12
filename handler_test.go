@@ -131,17 +131,20 @@ func TestEnabledThreeBranches(t *testing.T) {
 	gated := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
 	h := New(gated, WithLevel(slog.LevelInfo))
 
-	t.Run("no scope delegates to downstream", func(t *testing.T) {
-		// The downstream's answer is the handler's answer, verbatim. Asserting
-		// equality (not a fixed truth) is what pins delegation: a branch that
-		// returned a constant would pass one case and fail the other.
+	t.Run("no scope gates at the effective level", func(t *testing.T) {
+		// The downstream is deliberately wide open (New requires it, so replays
+		// survive), which means it cannot be consulted here: its answer would be
+		// true for everything above the floor, and slog would build records that
+		// Handle then throws away. The handler answers from its own level.
 		var b bytes.Buffer
-		down := openJSON(&b)
-		open := New(down, WithLevel(slog.LevelInfo))
-		for _, lvl := range []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelError} {
-			want := down.Enabled(context.Background(), lvl)
+		open := New(openJSON(&b), WithLevel(slog.LevelInfo))
+		for lvl, want := range map[slog.Level]bool{
+			slog.LevelDebug: false,
+			slog.LevelInfo:  true,
+			slog.LevelError: true,
+		} {
 			if got := open.Enabled(context.Background(), lvl); got != want {
-				t.Errorf("Enabled(%v) with no scope = %v, want %v (the downstream's answer)", lvl, got, want)
+				t.Errorf("Enabled(%v) with no scope = %v, want %v (the effective level decides)", lvl, got, want)
 			}
 		}
 	})
@@ -627,4 +630,73 @@ func decodeLines(t *testing.T, buf *bytes.Buffer) []record {
 		out = append(out, m)
 	}
 	return out
+}
+
+// WithPostTripLimit promises to bound what a tripped scope emits. A record at
+// the trip level is a record like any other once the trip has happened, so an
+// error storm after the failure must draw on the same budget: that storm is
+// precisely what the option exists to cap.
+//
+// The record that causes the trip is exempt, because suppressing it would leave
+// the replayed batch with no error line to anchor it.
+func TestPostTripLimitBoundsTripLevelRecords(t *testing.T) {
+	c := &capture{}
+	log := slog.New(New(c, WithLevel(slog.LevelInfo), WithPostTripLimit(1)))
+
+	ctx, done := Scope(context.Background())
+	defer done()
+
+	log.DebugContext(ctx, "seed")
+	log.ErrorContext(ctx, "trigger") // trips, exempt from the budget
+	log.ErrorContext(ctx, "second")  // spends the budget
+	log.ErrorContext(ctx, "third")   // suppressed
+
+	want := []string{"seed", "trigger", "second"}
+	if got := c.messages(); !equal(got, want) {
+		t.Fatalf("messages = %v, want %v: errors after the trip must draw on the post-trip budget", got, want)
+	}
+}
+
+// The trigger's exemption must not be a free pass for every later trip-level
+// record: only the one that actually caused the trip skips the budget.
+func TestPostTripLimitExemptsOnlyTheTrigger(t *testing.T) {
+	c := &capture{}
+	log := slog.New(New(c, WithLevel(slog.LevelInfo), WithPostTripLimit(0)))
+
+	ctx, done := Scope(context.Background())
+	defer done()
+
+	// A bare Trip means the first Error is no longer the trigger, so with an
+	// unlimited budget everything still passes; the point is that the budget is
+	// consulted at all.
+	Trip(ctx)
+	log.ErrorContext(ctx, "one")
+	log.ErrorContext(ctx, "two")
+
+	if got, want := c.messages(), []string{"one", "two"}; !equal(got, want) {
+		t.Fatalf("messages = %v, want %v: an unlimited budget must not suppress anything", got, want)
+	}
+}
+
+// The trigger exemption must be claimed by exactly one record even when the
+// scope never buffered anything, which is the shape a handler that only ever
+// logs errors produces. With no ring the trip is recorded on the carrier
+// instead, and every later error takes that same branch: without a one-shot
+// transition flag each of them would exempt itself and the budget would never
+// apply.
+func TestPostTripLimitBoundsErrorsWithNothingBuffered(t *testing.T) {
+	c := &capture{}
+	log := slog.New(New(c, WithLevel(slog.LevelInfo), WithPostTripLimit(1)))
+
+	ctx, done := Scope(context.Background())
+	defer done()
+
+	log.ErrorContext(ctx, "trigger") // trips, exempt
+	log.ErrorContext(ctx, "second")  // spends the budget
+	log.ErrorContext(ctx, "third")   // suppressed
+
+	want := []string{"trigger", "second"}
+	if got := c.messages(); !equal(got, want) {
+		t.Fatalf("messages = %v, want %v", got, want)
+	}
 }

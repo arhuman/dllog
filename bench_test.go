@@ -54,17 +54,14 @@ func jsonDiscard(level slog.Level) slog.Handler {
 // BenchmarkUnscopedDebug settles the first headline claim: an out-of-scope
 // Debug call costs what a disabled slog call costs.
 //
-// Both sides must be present for the comparison to mean anything, so the two
-// sub-benchmarks are identical except for the dllog Handler in the middle:
+// The honest baseline is slog-only-disabled: a logger over an Info-gated
+// handler, where Debug is refused by slog.Logger before a Record is ever
+// built. That is what every production Go service configured at Info already
+// pays, and it is the number dllog-no-scope must be compared against. dllog's
+// Enabled answers from its own effective level, so the extra cost over that
+// baseline is one context lookup for records in the buffer band.
 //
-//   - slog-only: a logger over an Info-gated handler. Debug is refused by
-//     slog.Logger before a Record is ever built. This is the baseline every Go
-//     service already pays.
-//   - dllog: the same Info-gated handler, wrapped by dllog, called with a
-//     context carrying no scope. dllog's Enabled must delegate straight to the
-//     downstream, so the extra cost is one nil map lookup on the context.
-//
-// The ratio between the two is the number the README quotes.
+// The ratio between those two is the number the README quotes.
 func BenchmarkUnscopedDebug(b *testing.B) {
 	ctx := context.Background()
 
@@ -80,12 +77,10 @@ func BenchmarkUnscopedDebug(b *testing.B) {
 		sink += down.n
 	})
 
-	// slog-only-debug-open is the like-for-like baseline, and it is the one the
-	// README quotes. dllog cannot run over an Info-gated downstream: it must see
-	// Debug records to buffer them, so New rejects a downstream that would
-	// swallow a replay. The honest question is therefore not "what does a
-	// service that refuses Debug pay", it is "what does a service that accepts
-	// Debug pay, with and without dllog in the way".
+	// slog-only-debug-open shows what a service that renders Debug everywhere
+	// pays. It is kept for contrast, not as the baseline: dllog's downstream is
+	// wide open like this one, but its Enabled refuses out-of-scope Debug at
+	// the level check, so dllog does not pay this record-construction cost.
 	b.Run("slog-only-debug-open", func(b *testing.B) {
 		down := &countingHandler{enabled: slog.LevelDebug}
 		log := slog.New(down)
@@ -99,8 +94,9 @@ func BenchmarkUnscopedDebug(b *testing.B) {
 	})
 
 	b.Run("dllog-no-scope", func(b *testing.B) {
-		// The downstream must be wide open for New to accept it, so the level
-		// gate that makes this the same comparison lives on the wrapper.
+		// The downstream must be wide open for New to accept it; the level
+		// gate lives on the wrapper, whose Enabled refuses this Debug before
+		// slog builds a record.
 		down := &countingHandler{enabled: slog.LevelDebug}
 		log := slog.New(dllog.New(down, dllog.WithLevel(slog.LevelInfo)))
 		b.ReportAllocs()
@@ -226,9 +222,9 @@ func BenchmarkMiddleware(b *testing.B) {
 	}
 }
 
-// BenchmarkEnabled isolates the three branches of the cost model documented on
-// Handler.Enabled: no scope (delegate downstream), scope untripped (compare
-// against the buffer floor), scope tripped (same comparison, different state).
+// BenchmarkEnabled isolates the cost model documented on Handler.Enabled for a
+// buffer-band level: no scope (level checks plus a context miss), scope
+// untripped and scope tripped (level checks plus a context hit).
 //
 // The result is assigned into the package sink, because a bare bool return from
 // an inlinable method is exactly the case the optimizer would delete.

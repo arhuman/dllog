@@ -16,10 +16,11 @@ const (
 	// emitted now; it will come back from Trip if the scope ever trips.
 	ActionBuffered Action = iota
 	// ActionPassThrough means the caller must emit the entry immediately, as
-	// if no scope existed. Returned after a trip, and after Close.
+	// if no scope existed. Returned after a trip.
 	ActionPassThrough
 	// ActionSuppressed means the caller must drop the entry: the post-trip
-	// budget is exhausted.
+	// budget is exhausted, or the scope has been closed and an entry it was
+	// only ever offered because of the scope has nowhere left to go.
 	ActionSuppressed
 )
 
@@ -115,13 +116,19 @@ func (s *Scope[T]) Dropped() int {
 // Append offers an entry to the scope and reports what the caller must do with
 // it. Before the trip the entry is buffered (evicting the oldest when full).
 // After the trip it passes through until the post-trip budget is spent, then is
-// suppressed. After Close it always passes through.
+// suppressed.
+//
+// After Close it is suppressed, not passed through: a released scope must
+// behave as no scope at all, and the entries a caller offers to Append are
+// exactly the below-level ones that no scope would have dropped. Passing them
+// through here would emit a below-level entry whenever a logger races the
+// scope's done, which is the one thing the level promised never happens.
 func (s *Scope[T]) Append(entry T) Action {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.closed {
-		return ActionPassThrough
+		return ActionSuppressed
 	}
 	if s.tripState {
 		if s.limit > 0 && s.postTrip >= s.limit {
@@ -191,8 +198,9 @@ func (s *Scope[T]) Trip() (entries []T, dropped int, tripped bool) {
 	return entries, dropped, true
 }
 
-// Close releases the scope. Subsequent Appends pass through as if no scope
-// existed, and Trip becomes a no-op. Close is idempotent and safe after a trip.
+// Close releases the scope. Subsequent Appends are suppressed, because a
+// released scope must treat a below-level entry the way no scope would (drop
+// it), and Trip becomes a no-op. Close is idempotent and safe after a trip.
 //
 // If the scope came from a ScopePool, Close returns the ring array to that pool.
 // It does so under mu, after setting closed and detaching s.ring, so a late

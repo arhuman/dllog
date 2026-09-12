@@ -171,23 +171,31 @@ func (c *Core) For(ctx context.Context) *Core {
 }
 
 // Enabled reports whether an entry at level should be produced. It is the cost
-// model of the package, in three branches:
+// model of the package, in three ordered checks:
 //
-//   - No scope bound: the downstream core decides, so an unbound Debug call
-//     stays the near-free no-op it would be without dllog.
-//   - Scope bound, not yet tripped: true from the buffer floor up, because those
-//     entries are candidates for the buffer.
-//   - Scope bound, tripped: true from the buffer floor up, because they now pass
-//     straight through.
+//   - At or above the effective level: true, bound or not. Write may still
+//     drop the entry when a tripped scope's post-trip budget is spent.
+//   - Below the buffer floor: false, everywhere. Nothing keeps such an entry.
+//   - In between, the buffer band: true exactly when the Core is bound to a
+//     live scope, because only a scope has somewhere to put it.
 //
-// The last two coincide today; they are kept distinct because they answer
-// different questions and only the tripped branch is bounded by the post-trip
-// limit, which Write applies.
+// The downstream is never consulted. It is deliberately constructed wide open
+// (New requires it, so replayed entries survive), which makes its answer
+// useless as a gate: delegating to it made every unbound Debug call build a
+// CheckedEntry that Write then threw away. Answering from the Core's own
+// levels lets Check refuse the entry before anything is built, which is what
+// keeps an unbound Debug at the cost of a disabled zap call.
+//
+// A Core bound to a scope that has since been released is treated as unbound:
+// the scope is gone, so only the levels decide.
 func (c *Core) Enabled(level zapcore.Level) bool {
-	if c.carrier == nil {
-		return c.downstream.Enabled(level)
+	if level >= c.cfg.level {
+		return true
 	}
-	return level >= c.cfg.bufferFloor
+	if level < c.cfg.bufferFloor {
+		return false
+	}
+	return c.carrier != nil && !c.carrier.Closed()
 }
 
 // Check adds this core to ce when the entry is enabled, as zapcore requires.
@@ -212,21 +220,18 @@ func (c *Core) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.Check
 // before ent itself is written. Everything happens synchronously, on the calling
 // goroutine.
 func (c *Core) Write(ent zapcore.Entry, fields []zapcore.Field) error {
-	if c.carrier == nil {
+	if c.carrier == nil || c.carrier.Closed() {
 		if ent.Level < c.cfg.level {
 			return nil
 		}
-		return c.downstream.Write(ent, fields)
+		return writeChecked(c.downstream, ent, fields)
 	}
 
 	if ent.Level >= c.cfg.tripLevel {
-		// MarkTripped both flushes an existing ring and records the trip when
-		// there is no ring yet, so entries logged after this failure pass
-		// through either way.
-		if s := c.carrier.MarkTripped(); s != nil {
-			core.Flush(s)
+		if c.tripAndSuppress() {
+			return nil
 		}
-		return c.downstream.Write(ent, fields)
+		return writeChecked(c.downstream, ent, fields)
 	}
 
 	// At or above the effective level the entry is written on the spot and
@@ -236,19 +241,82 @@ func (c *Core) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 	// everything else. A trip racing this check can let one entry through
 	// unbudgeted; that entry was writable either way.
 	if ent.Level >= c.cfg.level {
-		if c.carrier.Tripped() && c.carrier.Bind(c.pool).PassThrough() == core.ActionSuppressed {
+		if c.carrier.Tripped() && c.suppressed() {
 			return nil
 		}
-		return c.downstream.Write(ent, fields)
+		return writeChecked(c.downstream, ent, fields)
 	}
 
-	sl := slot{entry: ent, fields: clone(fields), downstream: c.downstream, replayKey: c.cfg.replayKey}
-	switch c.carrier.Bind(c.pool).Append(sl.coreEntry()) {
+	s := c.carrier.Bind(c.pool)
+	if s == nil {
+		// The scope was released between the check above and here, so this entry
+		// belongs to no live scope: treat it as unscoped.
+		return writeChecked(c.downstream, ent, fields)
+	}
+
+	sl := &slot{entry: ent, fields: clone(fields), downstream: c.downstream, replayKey: c.cfg.replayKey}
+	switch s.Append(sl) {
 	case core.ActionBuffered, core.ActionSuppressed:
 		return nil
 	default:
-		return c.downstream.Write(ent, fields)
+		return writeChecked(c.downstream, ent, fields)
 	}
+}
+
+// tripAndSuppress trips the scope for an entry at or above the trip level and
+// reports whether that entry must be dropped rather than written.
+//
+// MarkTripped both flushes an existing ring and records the trip when there is
+// no ring yet, so entries logged after this failure pass through either way.
+// Whichever branch applies, exactly one call is the one that moved the scope
+// into the tripped state.
+//
+// That entry is the trigger and is never suppressed: it is the error line the
+// replayed batch hangs from. Every trip-level entry after it draws on the
+// post-trip budget, because an error storm following the failure is exactly what
+// that budget exists to bound.
+func (c *Core) tripAndSuppress() bool {
+	s, trigger := c.carrier.MarkTripped()
+	if s != nil {
+		trigger = core.Flush(s)
+	}
+	return !trigger && c.suppressed()
+}
+
+// suppressed reports whether an entry the Core is about to write must be dropped
+// instead, because the scope has tripped and its post-trip budget is spent. It is
+// the one place that budget is charged for an entry the buffer never held.
+//
+// A released scope suppresses nothing: with no ring there is no budget to spend,
+// and the entry is governed by the level alone.
+func (c *Core) suppressed() bool {
+	s := c.carrier.Bind(c.pool)
+	return s != nil && s.PassThrough() == core.ActionSuppressed
+}
+
+// writeChecked emits ent through downstream's own Check, which is where a zap
+// core puts the behaviour that makes it more than a sink: a sampler counts and
+// drops there, a tee selects which children participate, and a wrapping core
+// decides whether to route the entry at all. Calling Write directly skips all of
+// it, so a sampler stops sampling and a tee writes to children that declined.
+//
+// A downstream that declines the entry returns nil and the entry is dropped,
+// which is the downstream's decision to make.
+//
+// CheckedEntry.Write reports no error, so a downstream write failure cannot be
+// propagated from here; zap reports it on the entry's own ErrorOutput. The nil
+// return keeps the signature this package's callers already expect.
+//
+// The CheckedEntry is built here and written once: zap pools them and marks
+// them dirty on Write, so one can never be held across the buffer window and
+// reused at replay time.
+func writeChecked(downstream zapcore.Core, ent zapcore.Entry, fields []zapcore.Field) error {
+	ce := downstream.Check(ent, nil)
+	if ce == nil {
+		return nil
+	}
+	ce.Write(fields...)
+	return nil
 }
 
 // With returns a Core whose entries carry fields, sharing this Core's
@@ -285,7 +353,7 @@ func (c *Core) Trip() {
 	if c.carrier == nil {
 		return
 	}
-	if s := c.carrier.MarkTripped(); s != nil {
+	if s, _ := c.carrier.MarkTripped(); s != nil {
 		core.Flush(s)
 	}
 }
@@ -311,16 +379,19 @@ func (c *Core) derive(downstream zapcore.Core, cr *carrier) *Core {
 type carrier struct{ *core.Carrier }
 
 // fromContext returns the shared carrier ctx holds, wrapped for this adapter,
-// or nil when ctx has no scope.
+// or nil when ctx has no live scope.
 //
 // It resolves through core.FromContext rather than looking for its own wrapper
 // type, because the scope may have been opened by any adapter and would then
 // carry that adapter's wrapper. Reaching the shared *core.Carrier under
 // whichever wrapper is present is exactly what makes the adapters share one
 // ring.
+//
+// A released scope reports nil, exactly as a context that never carried one, so
+// a Core bound to a context that has since been done behaves as an unbound one.
 func fromContext(ctx context.Context) *carrier {
 	shared := core.FromContext(ctx)
-	if shared == nil {
+	if shared == nil || shared.Closed() {
 		return nil
 	}
 	return &carrier{Carrier: shared}

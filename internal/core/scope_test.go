@@ -234,13 +234,16 @@ func TestPostTripLimit(t *testing.T) {
 	}
 }
 
-func TestCloseMakesAppendPassThrough(t *testing.T) {
+// A closed scope suppresses what it is offered: the entries a caller brings to
+// Append are the below-level ones only a live scope had a use for, and "as if
+// no scope existed" means the level drops them.
+func TestCloseMakesAppendSuppressed(t *testing.T) {
 	s := NewScope[int](8, 0)
 	s.Append(1)
 	s.Close()
 
-	if got := s.Append(2); got != ActionPassThrough {
-		t.Fatalf("Append() after Close() = %v, want ActionPassThrough", got)
+	if got := s.Append(2); got != ActionSuppressed {
+		t.Fatalf("Append() after Close() = %v, want ActionSuppressed", got)
 	}
 	if got := s.Len(); got != 0 {
 		t.Fatalf("Len() after Close() = %d, want 0", got)
@@ -254,12 +257,12 @@ func TestCloseIsIdempotent(t *testing.T) {
 	s.Close()
 	s.Close()
 
-	if got := s.Append(2); got != ActionPassThrough {
-		t.Fatalf("Append() = %v, want ActionPassThrough", got)
+	if got := s.Append(2); got != ActionSuppressed {
+		t.Fatalf("Append() = %v, want ActionSuppressed", got)
 	}
 }
 
-func TestCloseIgnoresPostTripBudget(t *testing.T) {
+func TestCloseSuppressesRegardlessOfSpentBudget(t *testing.T) {
 	s := NewScope[int](8, 1)
 	if _, _, ok := s.Trip(); !ok {
 		t.Fatal("Trip() did not trip")
@@ -269,9 +272,11 @@ func TestCloseIgnoresPostTripBudget(t *testing.T) {
 		t.Fatalf("Append() = %v, want ActionSuppressed", got)
 	}
 	s.Close()
-	// After Close the scope behaves as if it never existed: no suppression.
-	if got := s.Append(3); got != ActionPassThrough {
-		t.Fatalf("Append() after Close() = %v, want ActionPassThrough", got)
+	// Still suppressed after Close, now because the scope is gone rather than
+	// because the budget is spent: a released scope drops what only a live one
+	// could have carried.
+	if got := s.Append(3); got != ActionSuppressed {
+		t.Fatalf("Append() after Close() = %v, want ActionSuppressed", got)
 	}
 }
 
@@ -305,8 +310,8 @@ func TestCloseAfterTripIsSafe(t *testing.T) {
 	if want := []int{1, 2}; !reflect.DeepEqual(entries, want) {
 		t.Fatalf("entries after Close() = %v, want %v", entries, want)
 	}
-	if got := s.Append(3); got != ActionPassThrough {
-		t.Fatalf("Append() = %v, want ActionPassThrough", got)
+	if got := s.Append(3); got != ActionSuppressed {
+		t.Fatalf("Append() = %v, want ActionSuppressed", got)
 	}
 }
 

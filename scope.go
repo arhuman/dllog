@@ -16,25 +16,38 @@ import (
 // a record buffered through that Handler carries it into the ring, so the flush
 // emits every record through the handler that was in scope when it was logged,
 // marked the way that handler was configured.
+//
+// It implements core.Entry with pointer methods, so buffering a record costs
+// the one allocation of the slot itself; the interface word carries the
+// pointer without boxing, and no closures are built on the append path.
 type slot struct {
 	record     slog.Record
 	downstream slog.Handler
 	replayKey  string
 }
 
-// entry wraps s as a core entry, closing over the emission this adapter owes
-// the record so the core can hold it beside entries from other adapters
-// without naming slog.
-func (s slot) entry() core.Entry {
-	return core.Entry{
-		Emit: func() {
-			r := s.record
-			r.AddAttrs(slog.Bool(s.replayKey, true))
-			//nolint:errcheck // a replayed record has no caller left to return to.
-			_ = s.downstream.Handle(context.Background(), r)
-		},
-		Notify: func(n int) { emitDropped(s, n) },
-	}
+// Emit renders the buffered record through the downstream it was logged with,
+// marked with its handler's replay key. It is how the core hands the record
+// back at flush time without naming slog.
+func (s *slot) Emit() {
+	r := s.record
+	r.AddAttrs(slog.Bool(s.replayKey, true))
+	//nolint:errcheck // a replayed record has no caller left to return to.
+	_ = s.downstream.Handle(context.Background(), r)
+}
+
+// Notify reports entries the ring evicted, as one record carrying the count
+// under DroppedKey. It borrows this slot's time and downstream so the notice
+// lands just before the batch it belongs to, in the same stream.
+//
+// The core calls it on the oldest surviving entry, so an eviction announced on
+// a batch whose oldest survivor belongs to another adapter is rendered by that
+// adapter, in its own stream, rather than being forced into slog.
+func (s *slot) Notify(n int) {
+	r := slog.NewRecord(s.record.Time, slog.LevelWarn, DroppedMessage, 0)
+	r.AddAttrs(slog.Int(DroppedKey, n))
+	//nolint:errcheck // same as Emit: nobody left to report to.
+	_ = s.downstream.Handle(context.Background(), r)
 }
 
 // carrier is this adapter's handle on the shared scope carrier.
@@ -69,8 +82,9 @@ func (c *carrier) typed(scope *core.Scope[core.Entry]) *ring {
 type ring struct{ scope *core.Scope[core.Entry] }
 
 // Append offers a slot to the shared ring and reports what the caller must do
-// with it, exactly as the underlying scope does.
-func (r *ring) Append(s slot) core.Action { return r.scope.Append(s.entry()) }
+// with it, exactly as the underlying scope does. It takes the pointer the ring
+// will hold, so the caller's single allocation is the only one.
+func (r *ring) Append(s *slot) core.Action { return r.scope.Append(s) }
 
 // Capacity returns the shared ring's size.
 func (r *ring) Capacity() int { return r.scope.Capacity() }
@@ -87,9 +101,16 @@ func (r *ring) Trip() (entries []core.Entry, dropped int, tripped bool) {
 }
 
 // bind returns a typed view of the carrier's shared ring, creating the ring
-// from pool on first use.
+// from pool on first use, or nil once the scope has been released.
+//
+// The nil case must not reach typed: memoizing a view over a nil scope would
+// make every later bind on this carrier hand back a ring that panics on use.
 func (c *carrier) bind(pool *core.ScopePool[core.Entry]) *ring {
-	return c.typed(c.Bind(pool))
+	s := c.Bind(pool)
+	if s == nil {
+		return nil
+	}
+	return c.typed(s)
 }
 
 // bound returns a typed view of the carrier's ring without creating one, or nil
@@ -102,7 +123,13 @@ func (c *carrier) bound() *ring {
 	return c.typed(s)
 }
 
-// fromContext returns the carrier ctx holds, or nil when ctx has no scope.
+// fromContext returns the carrier ctx holds, or nil when ctx has no live scope.
+//
+// A released scope reports nil, exactly as a context that never carried one.
+// The context outlives the scope, so records keep arriving on it after done has
+// run; treating the carrier as absent is what makes those records fall back to
+// ordinary level filtering instead of being emitted by a dead scope or binding
+// a ring the pool will never see again.
 //
 // For a scope this package opened it recovers our own wrapper, so two lookups
 // return the identical *carrier and callers may compare them to decide whether
@@ -116,6 +143,9 @@ func (c *carrier) bound() *ring {
 // design rules out. Compare the embedded Carrier, not the wrapper.
 func fromContext(ctx context.Context) *carrier {
 	if c, ok := core.HolderFromContext(ctx).(*carrier); ok {
+		if c.Closed() {
+			return nil
+		}
 		return c
 	}
 	// The scope was opened by another adapter, so the context holds its wrapper
@@ -123,7 +153,7 @@ func fromContext(ctx context.Context) *carrier {
 	// anyway; without this the handler would treat the context as scope-less and
 	// drop every record logged below the configured level.
 	shared := core.FromContext(ctx)
-	if shared == nil {
+	if shared == nil || shared.Closed() {
 		return nil
 	}
 	return &carrier{Carrier: shared}
@@ -190,10 +220,11 @@ func trip(ctx context.Context) {
 	if c == nil {
 		return
 	}
-	s := c.MarkTripped()
+	s, _ := c.MarkTripped()
 	if s == nil {
 		// Nothing buffered yet: the trip is remembered and applied to the ring
-		// when one is created. There is nothing to replay.
+		// when one is created. There is nothing to replay, and a bare Trip is
+		// not a record, so whether it won the transition changes nothing here.
 		return
 	}
 	flush(s)
@@ -207,19 +238,4 @@ func trip(ctx context.Context) {
 // reads in order: what was lost, then what was kept.
 func flush(s *core.Scope[core.Entry]) bool {
 	return core.Flush(s)
-}
-
-// emitDropped reports entries the ring evicted, as one record carrying the
-// count under DroppedKey. It borrows the oldest surviving entry's time and
-// downstream so the notice lands just before the batch it belongs to, in the
-// same stream.
-//
-// It reaches the core as that entry's Notify thunk, so an eviction announced on
-// a batch whose oldest survivor belongs to another adapter is rendered by that
-// adapter, in its own stream, rather than being forced into slog.
-func emitDropped(oldest slot, dropped int) {
-	r := slog.NewRecord(oldest.record.Time, slog.LevelWarn, DroppedMessage, 0)
-	r.AddAttrs(slog.Int(DroppedKey, dropped))
-	//nolint:errcheck // same as flush: nobody left to report to.
-	_ = oldest.downstream.Handle(context.Background(), r)
 }

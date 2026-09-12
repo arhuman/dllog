@@ -6,10 +6,30 @@ import (
 	"testing"
 )
 
-// emitter builds an Entry that appends its name to out on emission, so a test
+// testEntry implements Entry for tests: emit and notify are optional thunks, so
+// one type covers entries that record their emission, announce evictions, or do
+// nothing at all.
+type testEntry struct {
+	emit   func()
+	notify func(n int)
+}
+
+func (e *testEntry) Emit() {
+	if e.emit != nil {
+		e.emit()
+	}
+}
+
+func (e *testEntry) Notify(n int) {
+	if e.notify != nil {
+		e.notify(n)
+	}
+}
+
+// emitter builds an entry that appends its name to out on emission, so a test
 // can assert the exact replay order the ring produced.
-func emitter(mu *sync.Mutex, out *[]string, name string) Entry {
-	return Entry{Emit: func() {
+func emitter(mu *sync.Mutex, out *[]string, name string) *testEntry {
+	return &testEntry{emit: func() {
 		mu.Lock()
 		defer mu.Unlock()
 		*out = append(*out, name)
@@ -104,8 +124,15 @@ func TestBoundReportsNilBeforeAnyBind(t *testing.T) {
 // pass-through state once a ring is created.
 func TestPreTrippedCarriesIntoTheRing(t *testing.T) {
 	c := &Carrier{}
-	if s := c.MarkTripped(); s != nil {
-		t.Fatalf("MarkTripped on an unbound carrier returned %p, want nil", s)
+	s0, first := c.MarkTripped()
+	if s0 != nil {
+		t.Fatalf("MarkTripped on an unbound carrier returned %p, want nil", s0)
+	}
+	if !first {
+		t.Fatal("the first trip on an unbound carrier did not report itself as the transition")
+	}
+	if _, again := c.MarkTripped(); again {
+		t.Fatal("a second trip reported itself as the transition: only one call may claim it")
 	}
 	if !c.Tripped() {
 		t.Fatal("a carrier that recorded an early trip does not report tripped")
@@ -115,7 +142,7 @@ func TestPreTrippedCarriesIntoTheRing(t *testing.T) {
 	if !s.Tripped() {
 		t.Fatal("the ring created after an early trip is not tripped: the trip vanished")
 	}
-	if got := s.Append(Entry{}); got != ActionPassThrough {
+	if got := s.Append(&testEntry{}); got != ActionPassThrough {
 		t.Fatalf("append after an early trip = %v, want %v", got, ActionPassThrough)
 	}
 }
@@ -126,8 +153,15 @@ func TestMarkTrippedReturnsTheBoundScope(t *testing.T) {
 	c := &Carrier{}
 	s := c.Bind(NewScopePool[Entry](8, 0))
 
-	if got := c.MarkTripped(); got != s {
+	got, first := c.MarkTripped()
+	if got != s {
 		t.Fatalf("MarkTripped = %p, want the bound scope %p", got, s)
+	}
+	if first {
+		// With a scope in hand the transition is Flush's to report, so this
+		// return must not also claim it: both claiming would exempt two records
+		// from the post-trip budget.
+		t.Fatal("MarkTripped claimed the transition while returning a scope")
 	}
 }
 
@@ -141,8 +175,8 @@ func TestCarrierCloseIsSafeAndIdempotent(t *testing.T) {
 	c.Close()
 	c.Close()
 
-	if got := s.Append(Entry{}); got != ActionPassThrough {
-		t.Fatalf("append after Close = %v, want %v", got, ActionPassThrough)
+	if got := s.Append(&testEntry{}); got != ActionSuppressed {
+		t.Fatalf("append after Close = %v, want %v", got, ActionSuppressed)
 	}
 	if _, _, tripped := s.Trip(); tripped {
 		t.Fatal("Trip succeeded on a closed scope, want a no-op")
@@ -178,7 +212,7 @@ func TestFlushLetsEachEntryMarkItself(t *testing.T) {
 	c := &Carrier{}
 	s := c.Bind(NewScopePool[Entry](8, 0))
 	for _, key := range []string{"slog_key", "zap_key"} {
-		s.Append(Entry{Emit: func() { got = append(got, key) }})
+		s.Append(&testEntry{emit: func() { got = append(got, key) }})
 	}
 
 	Flush(s)
@@ -187,11 +221,12 @@ func TestFlushLetsEachEntryMarkItself(t *testing.T) {
 	}
 }
 
-// A nil Emit (the zero Entry) must not panic the flush.
-func TestFlushSkipsEntriesWithNoEmit(t *testing.T) {
+// A nil Entry (the zero value of the interface, what a cleared ring slot
+// holds) must not panic the flush.
+func TestFlushSkipsNilEntries(t *testing.T) {
 	c := &Carrier{}
 	s := c.Bind(NewScopePool[Entry](8, 0))
-	s.Append(Entry{})
+	s.Append(nil)
 
 	if !Flush(s) {
 		t.Fatal("Flush reported no trip")
@@ -208,7 +243,7 @@ func TestFlushAnnouncesEvictionOnTheOldestSurvivor(t *testing.T) {
 
 	s.Append(emitter(&mu, &out, "evicted"))
 	oldest := emitter(&mu, &out, "oldest")
-	oldest.Notify = func(n int) {
+	oldest.notify = func(n int) {
 		mu.Lock()
 		defer mu.Unlock()
 		out = append(out, "dropped:"+itoa(n))
@@ -288,4 +323,75 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(digits)
+}
+
+// Close is permanent: a carrier released while it still had no ring must not
+// build one for a late entry. Without this the late Bind would allocate a ring
+// from the pool that nothing will ever Close, so it is never recycled.
+func TestCloseIsPermanentOnUnboundCarrier(t *testing.T) {
+	var c Carrier
+	pool := NewScopePool[Entry](4, 0)
+
+	c.Close()
+
+	if s := c.Bind(pool); s != nil {
+		t.Fatal("Bind() on a closed carrier returned a scope, want nil: a late entry must not resurrect a released scope")
+	}
+	if c.Bound() != nil {
+		t.Fatal("Bound() reports a scope after Close(), want nil")
+	}
+}
+
+// The same permanence must hold once a ring existed: Bind must stop handing the
+// closed scope back, so an adapter sees "no scope" rather than a scope whose
+// Append passes everything through.
+func TestCloseIsPermanentOnBoundCarrier(t *testing.T) {
+	var c Carrier
+	pool := NewScopePool[Entry](4, 0)
+
+	if c.Bind(pool) == nil {
+		t.Fatal("Bind() before Close returned nil")
+	}
+	c.Close()
+
+	if s := c.Bind(pool); s != nil {
+		t.Fatalf("Bind() after Close() = %v, want nil", s)
+	}
+}
+
+// A trip arriving after the scope was released must not be recorded: there is
+// nothing left to flush, and remembering it would make a later Bind hand out a
+// pre-tripped scope.
+func TestMarkTrippedAfterCloseIsInert(t *testing.T) {
+	var c Carrier
+	pool := NewScopePool[Entry](4, 0)
+
+	c.Close()
+
+	s, first := c.MarkTripped()
+	if s != nil {
+		t.Fatalf("MarkTripped() after Close() = %v, want nil", s)
+	}
+	if first {
+		t.Fatal("MarkTripped() claimed the transition on a closed carrier")
+	}
+	if c.Tripped() {
+		t.Fatal("Tripped() reports true after a post-Close trip, want false: a released scope has no state to trip")
+	}
+	if c.Bind(pool) != nil {
+		t.Fatal("Bind() after a post-Close trip returned a scope, want nil")
+	}
+}
+
+// Closed is the predicate both adapters branch on, so it must report the two
+// states distinctly regardless of whether a ring was ever bound.
+func TestClosedReportsReleaseState(t *testing.T) {
+	var c Carrier
+	if c.Closed() {
+		t.Fatal("a fresh carrier reports closed")
+	}
+	c.Close()
+	if !c.Closed() {
+		t.Fatal("Closed() is false after Close()")
+	}
 }

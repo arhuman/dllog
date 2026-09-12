@@ -33,6 +33,26 @@ This project adheres to [Semantic Versioning](https://semver.org).
   instead of lost when the scope ends cleanly.
 - Constructors panic on out-of-order levels (buffer floor <= level <= trip
   level).
+- A released scope no longer emits or buffers: a context used after its `done`
+  behaves as one that never carried a scope.
+- `WithPostTripLimit` bounds records at the trip level too, so a post-failure
+  error storm is capped; the record that trips the scope stays exempt.
+- The zap adapter writes through the downstream's `Check`, so a downstream
+  sampler, tee or routing core governs replayed and live entries alike.
+
+### Changed
+
+- `Enabled` answers from the handler's own levels instead of delegating to the
+  wide-open downstream, so an out-of-scope below-level call is refused before
+  slog builds the record; `logger.Enabled(ctx, LevelDebug)` outside a scope now
+  reports false. Same on the zap adapter.
+- Buffering a record costs one allocation (the ring slot) instead of three:
+  ring entries implement an interface rather than carrying closures.
+- Per-record scope-state reads (bound, tripped, closed) are atomic loads; the
+  carrier's mutex now guards only its transitions.
+- A below-level record that races the scope's release is dropped rather than
+  emitted: a closed ring suppresses what it is offered, as no scope would have
+  kept it.
 
 ### Security
 
@@ -43,8 +63,8 @@ This project adheres to [Semantic Versioning](https://semver.org).
 
 - Scope memory is hard-bounded: a fixed pooled ring per scope, oldest dropped
   first with the loss counted in the replay.
-- With no scope open, dllog matches plain slog: 151.6 ns vs 150.7 ns per Debug
-  record through the same handler, zero allocations (M3 Pro).
+- With no scope open, a Debug call costs 8.9 ns and zero allocations against
+  the 4.0 ns of a plain slog logger configured at Info (M3 Pro).
 - Buffered values are formatted at replay, not at log time; see the README
   caveats before logging mutable references.
 - Requires Go 1.24 or later.

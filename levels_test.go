@@ -131,3 +131,48 @@ func TestNewPanicsOnOutOfOrderLevels(t *testing.T) {
 		})
 	}
 }
+
+// TestEnabledMatchesWhatHandleDoes pins Enabled to the emission contract: it
+// must not overreport, because slog.Logger builds the full record whenever
+// Enabled says true, and an out-of-scope below-level record is built only to be
+// thrown away in Handle. The downstream is deliberately wide open (New requires
+// it), so a delegating Enabled would answer true for everything above the floor.
+func TestEnabledMatchesWhatHandleDoes(t *testing.T) {
+	h := New(&capture{}, WithLevel(slog.LevelInfo))
+
+	noScope := context.Background()
+	scoped, done := Scope(context.Background())
+	defer done()
+
+	for _, tc := range []struct {
+		name  string
+		ctx   context.Context
+		level slog.Level
+		want  bool
+	}{
+		{"no scope, below level", noScope, slog.LevelDebug, false},
+		{"no scope, at level", noScope, slog.LevelInfo, true},
+		{"no scope, above level", noScope, slog.LevelError, true},
+		{"scoped, buffer band", scoped, slog.LevelDebug, true},
+		{"scoped, at level", scoped, slog.LevelInfo, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := h.Enabled(tc.ctx, tc.level); got != tc.want {
+				t.Fatalf("Enabled(%v) = %v, want %v", tc.level, got, tc.want)
+			}
+		})
+	}
+}
+
+// A record below the buffer floor is refused everywhere: out of scope it is
+// below the level, and in scope it is below what the buffer keeps.
+func TestEnabledRefusesBelowTheFloor(t *testing.T) {
+	h := New(&capture{}, WithBufferFloor(slog.LevelInfo), WithLevel(slog.LevelInfo))
+
+	scoped, done := Scope(context.Background())
+	defer done()
+
+	if h.Enabled(scoped, slog.LevelDebug) {
+		t.Fatal("Enabled(Debug) = true with an Info buffer floor: below-floor records are never kept")
+	}
+}

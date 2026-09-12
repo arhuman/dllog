@@ -2,8 +2,6 @@ package zapadapter
 
 import (
 	"go.uber.org/zap/zapcore"
-
-	"github.com/arhuman/dllog/internal/core"
 )
 
 // slot is what this adapter puts in a scope's ring: a zap entry with its copied
@@ -15,6 +13,10 @@ import (
 // buffered through that Core carries it into the ring, so the flush writes every
 // entry through the core that was in scope when it was logged, marked the way
 // that core was configured.
+//
+// It implements core.Entry with pointer methods, so buffering an entry costs
+// the slot allocation and the field copy; no closures are built on the append
+// path.
 type slot struct {
 	entry      zapcore.Entry
 	fields     []zapcore.Field
@@ -22,41 +24,40 @@ type slot struct {
 	replayKey  string
 }
 
-// coreEntry wraps s as a core entry, closing over the write this adapter owes
-// the entry so the core can hold it beside entries from other adapters without
-// naming zap.
-func (s slot) coreEntry() core.Entry {
-	return core.Entry{
-		Emit: func() {
-			fields := make([]zapcore.Field, 0, len(s.fields)+1)
-			fields = append(fields, s.fields...)
-			fields = append(fields, zapcore.Field{
-				Key:       s.replayKey,
-				Type:      zapcore.BoolType,
-				Integer:   1,
-				Interface: nil,
-			})
-			//nolint:errcheck // a replayed entry has no caller left to return to.
-			_ = s.downstream.Write(s.entry, fields)
-		},
-		Notify: func(n int) { emitDropped(s, n) },
-	}
+// Emit writes the buffered entry through the downstream it was logged with,
+// marked with its Core's replay key. It is how the core hands the entry back at
+// flush time without naming zap.
+func (s *slot) Emit() {
+	fields := make([]zapcore.Field, 0, len(s.fields)+1)
+	fields = append(fields, s.fields...)
+	fields = append(fields, zapcore.Field{
+		Key:       s.replayKey,
+		Type:      zapcore.BoolType,
+		Integer:   1,
+		Interface: nil,
+	})
+	// Through Check, not Write: a replayed entry is offered to the downstream
+	// on the same terms a live one is, so a sampler or tee below this adapter
+	// still governs it. The offer happens now, at replay time, because a
+	// CheckedEntry is single-use and cannot be held across the buffer window.
+	//nolint:errcheck // a replayed entry has no caller left to return to.
+	_ = writeChecked(s.downstream, s.entry, fields)
 }
 
-// emitDropped reports entries the ring evicted, as one entry carrying the count
-// under DroppedKey. It borrows the oldest survivor's time and downstream so the
-// notice lands just before the batch it belongs to, in the same stream.
+// Notify reports entries the ring evicted, as one entry carrying the count
+// under DroppedKey. It borrows this slot's time and downstream so the notice
+// lands just before the batch it belongs to, in the same stream.
 //
-// It reaches the core as that entry's Notify thunk, so an eviction announced on
+// The core calls it on the oldest surviving entry, so an eviction announced on
 // a batch whose oldest survivor belongs to another adapter is rendered by that
 // adapter, in its own stream, rather than being forced into zap.
-func emitDropped(oldest slot, dropped int) {
+func (s *slot) Notify(n int) {
 	ent := zapcore.Entry{
 		Level:   zapcore.WarnLevel,
-		Time:    oldest.entry.Time,
+		Time:    s.entry.Time,
 		Message: DroppedMessage,
 	}
-	field := zapcore.Field{Key: DroppedKey, Type: zapcore.Int64Type, Integer: int64(dropped)}
-	//nolint:errcheck // same as the replay path: nobody left to report to.
-	_ = oldest.downstream.Write(ent, []zapcore.Field{field})
+	field := zapcore.Field{Key: DroppedKey, Type: zapcore.Int64Type, Integer: int64(n)}
+	//nolint:errcheck // same as Emit: nobody left to report to.
+	_ = writeChecked(s.downstream, ent, []zapcore.Field{field})
 }

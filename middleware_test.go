@@ -616,10 +616,15 @@ func TestMiddlewareReleasesTheScope(t *testing.T) {
 	sink := &mwSink{}
 	logger := slog.New(New(sink))
 
+	// The scope is grabbed while the request is still in flight: once the
+	// middleware releases it the context reports no carrier at all, which is
+	// itself part of what this test proves.
 	var captured *carrier
+	var s *ring
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		captured = fromContext(r.Context())
 		logger.DebugContext(r.Context(), "buffered")
+		s = captured.bound()
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -629,13 +634,16 @@ func TestMiddlewareReleasesTheScope(t *testing.T) {
 	if captured == nil {
 		t.Fatal("handler saw no scope on the request context")
 	}
-	s := captured.bound()
 	if s == nil {
 		t.Fatal("no ring was bound despite a buffered record")
 	}
-	// A released scope buffers nothing: a late record passes through instead.
-	if got := s.Append(slot{}); got != core.ActionPassThrough {
+	if !captured.Closed() {
+		t.Fatal("the middleware returned without releasing the scope")
+	}
+	// A released scope buffers nothing: a late record is suppressed, exactly as
+	// the level would have dropped it with no scope there.
+	if got := s.Append(&slot{}); got != core.ActionSuppressed {
 		t.Fatalf("append after the request returned = %v, want %v: the middleware did not release the scope",
-			got, core.ActionPassThrough)
+			got, core.ActionSuppressed)
 	}
 }
