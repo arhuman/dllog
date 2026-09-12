@@ -789,3 +789,38 @@ func TestReleasedScopeFiltersLateEntries(t *testing.T) {
 		t.Fatalf("messages = %v, want none: an entry logged after done() must be filtered, not written", got)
 	}
 }
+
+// Releasing a scope while other goroutines still log through a bound Core is a
+// real shutdown race. A below-level entry that races done() must be dropped,
+// exactly as the slog handler drops it: with no live scope, the level decides,
+// and Debug is below it.
+//
+// This is the zap mirror of the root package's released-scope race test; the
+// two adapters shipped divergent answers to this exact window once, which is
+// why both sides now pin it.
+func TestReleasedScopeRaceWithLateLogger(t *testing.T) {
+	s := &sink{}
+	base := zapadapter.New(newZapSink(s), zapadapter.WithLevel(zapcore.InfoLevel))
+
+	ctx, done := zapadapter.Scope(context.Background())
+	logger := zap.New(base.For(ctx))
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 200 {
+				logger.Debug("concurrent")
+			}
+		}()
+	}
+	done()
+	wg.Wait()
+
+	// The scope never tripped, so every buffered entry was discarded with it
+	// and nothing below the level may have reached the downstream.
+	if got := s.messages(); len(got) != 0 {
+		t.Fatalf("%d below-level entries reached the downstream during shutdown: %v", len(got), got[:min(3, len(got))])
+	}
+}

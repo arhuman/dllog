@@ -39,6 +39,8 @@ This project adheres to [Semantic Versioning](https://semver.org).
   error storm is capped; the record that trips the scope stays exempt.
 - The zap adapter writes through the downstream's `Check`, so a downstream
   sampler, tee or routing core governs replayed and live entries alike.
+- The zap adapter drops a below-level entry that races the scope's release
+  instead of writing it, matching the slog handler.
 
 ### Changed
 

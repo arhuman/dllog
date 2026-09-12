@@ -249,9 +249,12 @@ func (c *Core) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 
 	s := c.carrier.Bind(c.pool)
 	if s == nil {
-		// The scope was released between the check above and here, so this entry
-		// belongs to no live scope: treat it as unscoped.
-		return writeChecked(c.downstream, ent, fields)
+		// The scope was released between the check above and here, so this
+		// entry belongs to no live scope: a below-level entry without a scope
+		// is dropped by the level, exactly as the slog handler's counterpart
+		// drops it. Writing it here would emit a below-level entry whenever a
+		// logger races the scope's done.
+		return nil
 	}
 
 	sl := &slot{entry: ent, fields: clone(fields), downstream: c.downstream, replayKey: c.cfg.replayKey}
