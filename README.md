@@ -171,8 +171,8 @@ The `log/slog` handler, the HTTP middleware, and the zap adapter are implemented
 and tested. Neither adapter is built on the other: both drive `internal/core`
 directly, and either one's `Scope` is visible to the other.
 
-Pre-v1 and untagged: `go get` resolves to a pseudo-version, and the API may
-still change.
+Pre-v1: released as v0.1.x, and the API may still change before v1. Releases
+are tagged and listed in the [CHANGELOG](CHANGELOG.md).
 
 ## Security
 
