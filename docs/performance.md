@@ -42,12 +42,17 @@ paid per request rather than per record.
 
 ## Memory
 
-Bounded by construction: `capacity x record size x live scopes`.
+Bounded by count, by construction: at most `capacity` records per live scope.
 
 The ring is a fixed, preallocated array per scope, default 256 slots. When it
 fills it evicts the oldest record, keeping the ones nearest the failure, which
 are the diagnostic ones. On replay, a synthetic record reports how many were
 dropped, so truncation is never silent.
+
+The bound is on how many records are held, not on the bytes they retain: a
+buffered record keeps references to whatever was logged (and to its context)
+until the scope trips or ends, and a bounded count of large objects is still
+large. See the caveats for what that means in practice.
 
 Scopes are released explicitly by `done`, so the count of live scopes is bounded
 by your concurrency, not by uptime. `TestSoakScopeChurnKeepsHeapFlat` drives

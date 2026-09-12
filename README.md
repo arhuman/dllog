@@ -141,9 +141,11 @@ before it is built, and the difference is one context lookup. Inside a scope,
 buffering a record costs about 235 ns and one allocation, the price of having
 it available if the operation later fails.
 
-Memory is hard-bounded by construction: `capacity x record size x live scopes`,
-a fixed preallocated ring per scope, 256 slots by default, evicting oldest-first
-with a synthetic record reporting anything dropped. Nothing grows with uptime.
+The buffer is strictly count-bounded: a fixed preallocated ring per scope, 256
+records by default, evicting oldest-first with a synthetic record reporting
+anything dropped. What each buffered record retains is up to you, since a
+record keeps references to what you logged until the scope ends: see
+[the caveats](docs/caveats.md). Nothing grows with uptime.
 
 Full tables and methodology: [docs/performance.md](docs/performance.md).
 
