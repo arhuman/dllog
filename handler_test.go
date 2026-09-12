@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -698,5 +699,51 @@ func TestPostTripLimitBoundsErrorsWithNothingBuffered(t *testing.T) {
 	want := []string{"trigger", "second"}
 	if got := c.messages(); !equal(got, want) {
 		t.Fatalf("messages = %v, want %v", got, want)
+	}
+}
+
+// ctxProbe records the context value it sees on each Handle call, so a test
+// can prove which context a replayed record travelled with.
+type ctxProbe struct {
+	slog.Handler
+	mu   sync.Mutex
+	seen []any
+}
+
+type probeKey struct{}
+
+func (p *ctxProbe) Handle(ctx context.Context, r slog.Record) error {
+	p.mu.Lock()
+	p.seen = append(p.seen, ctx.Value(probeKey{}))
+	p.mu.Unlock()
+	return p.Handler.Handle(ctx, r)
+}
+
+// A replayed record reaches the downstream with the context it was logged
+// with, not a fresh background one. Downstream handlers that enrich from the
+// context (trace and span IDs, tenant, correlation ids) are exactly the ones a
+// replay exists to feed during an incident, so live and replayed records must
+// look the same to them.
+func TestReplayCarriesOriginalContext(t *testing.T) {
+	p := &ctxProbe{Handler: slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug})}
+	log := slog.New(New(p, WithLevel(slog.LevelInfo)))
+
+	base := context.WithValue(context.Background(), probeKey{}, "trace-abc")
+	ctx, done := Scope(base)
+	defer done()
+
+	log.DebugContext(ctx, "buffered")
+	log.ErrorContext(ctx, "boom")
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.seen) != 2 {
+		t.Fatalf("downstream saw %d records, want 2 (replay + trigger)", len(p.seen))
+	}
+	if p.seen[0] != "trace-abc" {
+		t.Fatalf("replayed record carried ctx value %v, want %q: the replay must travel with its original context", p.seen[0], "trace-abc")
+	}
+	if p.seen[1] != "trace-abc" {
+		t.Fatalf("live record carried ctx value %v, want %q", p.seen[1], "trace-abc")
 	}
 }

@@ -9,36 +9,48 @@ import (
 )
 
 // slot is what this adapter puts in a scope's ring: a cloned record, the
-// downstream handler that must emit it, and the replay key to mark it with.
+// context it was logged with, the downstream handler that must emit it, and
+// the replay key to mark it with.
 //
-// The triple is what makes WithAttrs and WithGroup work without reimplementing
-// attr flattening. Each derived Handler eagerly derives its own downstream, and
-// a record buffered through that Handler carries it into the ring, so the flush
-// emits every record through the handler that was in scope when it was logged,
-// marked the way that handler was configured.
+// The downstream and the context are what make a replayed record
+// indistinguishable from a live one. Each derived Handler eagerly derives its
+// own downstream, and a record buffered through that Handler carries it into
+// the ring, so the flush emits every record through the handler that was in
+// scope when it was logged, marked the way that handler was configured, with
+// the context a downstream enriching from it (trace and span ids, tenant,
+// correlation) saw on the live records around it.
+//
+// Holding ctx costs nothing past the operation: slots are cleared at trip and
+// at close, both of which end with the operation the context belongs to. See
+// docs/adr/0002-replay-context.md.
 //
 // It implements core.Entry with pointer methods, so buffering a record costs
 // the one allocation of the slot itself; the interface word carries the
 // pointer without boxing, and no closures are built on the append path.
 type slot struct {
+	ctx        context.Context
 	record     slog.Record
 	downstream slog.Handler
 	replayKey  string
 }
 
 // Emit renders the buffered record through the downstream it was logged with,
-// marked with its handler's replay key. It is how the core hands the record
-// back at flush time without naming slog.
+// under the context it was logged with, marked with its handler's replay key.
+// It is how the core hands the record back at flush time without naming slog.
+//
+// The context may be cancelled by the time the replay runs; the slog contract
+// tells handlers to read values from it, never cancellation, so a cancelled
+// context still carries the ids the downstream wants.
 func (s *slot) Emit() {
 	r := s.record
 	r.AddAttrs(slog.Bool(s.replayKey, true))
 	//nolint:errcheck // a replayed record has no caller left to return to.
-	_ = s.downstream.Handle(context.Background(), r)
+	_ = s.downstream.Handle(s.ctx, r)
 }
 
 // Notify reports entries the ring evicted, as one record carrying the count
-// under DroppedKey. It borrows this slot's time and downstream so the notice
-// lands just before the batch it belongs to, in the same stream.
+// under DroppedKey. It borrows this slot's time, context and downstream so the
+// notice lands just before the batch it belongs to, in the same stream.
 //
 // The core calls it on the oldest surviving entry, so an eviction announced on
 // a batch whose oldest survivor belongs to another adapter is rendered by that
@@ -47,7 +59,7 @@ func (s *slot) Notify(n int) {
 	r := slog.NewRecord(s.record.Time, slog.LevelWarn, DroppedMessage, 0)
 	r.AddAttrs(slog.Int(DroppedKey, n))
 	//nolint:errcheck // same as Emit: nobody left to report to.
-	_ = s.downstream.Handle(context.Background(), r)
+	_ = s.downstream.Handle(s.ctx, r)
 }
 
 // carrier is this adapter's handle on the shared scope carrier.

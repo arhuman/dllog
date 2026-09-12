@@ -135,10 +135,10 @@ creator releases the buffer.
 
 ## Cost
 
-Outside a scope, a Debug call costs 8.9 ns/op and zero allocations against the
-4.0 ns/op of a plain slog logger configured at Info: the record is refused
+Outside a scope, a Debug call costs 9.1 ns/op and zero allocations against the
+4.2 ns/op of a plain slog logger configured at Info: the record is refused
 before it is built, and the difference is one context lookup. Inside a scope,
-buffering a record costs about 200 ns and one allocation, the price of having
+buffering a record costs about 235 ns and one allocation, the price of having
 it available if the operation later fails.
 
 Memory is hard-bounded by construction: `capacity x record size x live scopes`,

@@ -43,6 +43,9 @@ This project adheres to [Semantic Versioning](https://semver.org).
   instead of writing it, matching the slog handler.
 - A downstream write failure in the zap adapter is reported to stderr instead
   of vanishing silently.
+- Replayed records carry the context they were logged with, so downstream
+  handlers enriching from it (trace ids, tenants) see live and replayed
+  records alike (see [ADR 0002](docs/adr/0002-replay-context.md)).
 
 ### Changed
 

@@ -9,13 +9,13 @@ truth; the prose below explains it and quotes no other numbers.
 
 | Path | Time | Bytes | Allocations |
 |---|---|---|---|
-| Plain slog, Info-gated handler, Debug call | 4.0 ns/op | 0 | 0 |
-| dllog, no scope in context, Debug call | 8.9 ns/op | 0 | 0 |
-| Plain slog, Debug-open downstream, Debug call | 149.4 ns/op | 0 | 0 |
-| dllog, buffering inside a scope | 202.0 ns/op | 320 | 1 |
-| `Enabled`, no scope | 6.4 ns/op | 0 | 0 |
-| Full request through the middleware, 200 | 2093 ns/op | 3378 | 21 |
-| Full request through the middleware, 500 | 4753 ns/op | 3653 | 25 |
+| Plain slog, Info-gated handler, Debug call | 4.2 ns/op | 0 | 0 |
+| dllog, no scope in context, Debug call | 9.1 ns/op | 0 | 0 |
+| Plain slog, Debug-open downstream, Debug call | 154.9 ns/op | 0 | 0 |
+| dllog, buffering inside a scope | 234.8 ns/op | 352 | 1 |
+| `Enabled`, no scope | 6.7 ns/op | 0 | 0 |
+| Full request through the middleware, 200 | 2231 ns/op | 3635 | 21 |
+| Full request through the middleware, 500 | 5137 ns/op | 3910 | 25 |
 
 Three things are worth reading carefully.
 
@@ -23,12 +23,12 @@ Three things are worth reading carefully.
 honest baseline is the first row: a production service configured at Info,
 where `slog.Logger` sees Debug disabled and drops the call before building a
 record. dllog's `Enabled` answers from its own levels, so an out-of-scope Debug
-is refused the same way; the difference between 8.9 ns and 4.0 ns is one
+is refused the same way; the difference between 9.1 ns and 4.2 ns is one
 context lookup, paid only for levels between the buffer floor and the effective
-level. The 149 ns third row is what rendering Debug everywhere costs; dllog
+level. The 155 ns third row is what rendering Debug everywhere costs; dllog
 does not pay it, and neither does the caller.
 
-**Inside a scope, you pay to keep the record.** Buffering costs about 200 ns
+**Inside a scope, you pay to keep the record.** Buffering costs about 235 ns
 and one allocation: the record and its attributes are cloned into a ring slot
 and held rather than written and forgotten. That is the price of having the
 Debug context available if the operation later fails. The ring arrays

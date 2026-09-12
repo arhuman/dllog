@@ -16,16 +16,19 @@ it, and that lasts until the scope replays or ends. Logging a large object at
 records is capped by `WithCapacity`, but their size is not: a bounded count of
 large objects is still large.
 
-**A replayed record does not carry the original context.** The downstream
-handler receives `context.Background()` on replay, while a live record carries
-the request context it was logged with. A downstream that reads values from
-the context, a trace or tenant ID extracted in `Handle`, a `ReplaceAttr`
-closure over it, will therefore see them on live records and not on replayed
-ones. Retaining the context per buffered record would extend its lifetime, and
-that of everything hanging off it, past the operation the scope bounds, which
-is the trade dllog refuses by design. Put values you need on every record into
-the record itself (`slog.With`, zap fields) rather than fishing them out of
-the context downstream.
+**A replayed record carries the context it was logged with, cancelled or
+not.** Each buffered record keeps its original `context.Context` and is
+replayed under it, so a downstream that enriches from the context, trace and
+span IDs, tenant, correlation ids, sees the same values on replayed records as
+on live ones. Two consequences are worth knowing. The context may already be
+cancelled when the replay runs; the slog contract tells handlers to read
+values from a context and never its cancellation, so a conforming downstream
+is unaffected. And the buffer holds a reference to the context until the scope
+trips or ends, which is bounded by the operation itself but joins the
+retention list above: whatever hangs off that context lives as long as the
+operation does anyway. The zap adapter has no equivalent because zap itself
+carries no per-call context; nothing is lost there that zap ever had. See
+[ADR 0002](adr/0002-replay-context.md).
 
 **Under `WithGroup`, the replay marker moves.** A handler built with
 `WithGroup("http")` nests everything it logs under that group name. The marker

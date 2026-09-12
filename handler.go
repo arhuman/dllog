@@ -236,7 +236,7 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 		// dropped by the level.
 		return nil
 	}
-	switch s.Append(&slot{record: r.Clone(), downstream: h.downstream, replayKey: h.cfg.replayKey}) {
+	switch s.Append(&slot{ctx: ctx, record: r.Clone(), downstream: h.downstream, replayKey: h.cfg.replayKey}) {
 	case core.ActionBuffered:
 		return nil
 	case core.ActionSuppressed:
