@@ -46,14 +46,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          # The pinned golangci-lint needs Go >= 1.26 to install, so this cannot
-          # follow go.mod's 1.24 floor: with GOTOOLCHAIN=local the install fails
-          # outright. Pinned rather than `stable` because the pinned linter's
-          # staticcheck must understand this toolchain's stdlib, and a newer Go
-          # than it knows panics it. Raise both together, or raise the go.mod
-          # floor and drop this pin. The floor itself stays covered by the test
-          # matrix, which builds and tests against it.
-          go-version: "1.26"
+          # The gate toolchain, not the go.mod floor: the pinned tools dictate
+          # this version. Raise .go-version together with the tool pins below.
+          # See docs/adr/0003-gate-toolchain-pin.md.
+          go-version-file: .go-version
       # Versions MUST equal the Makefile's GOLANGCI_VERSION / GOVULNCHECK_VERSION
       # and _shared/references/versions.md.
       - name: Install pinned tools

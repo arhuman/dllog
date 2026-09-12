@@ -22,7 +22,10 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          # The gate toolchain, not the go.mod floor: `make ci` installs the
+          # pinned tools, which dictate the Go version. The floor is covered by
+          # the CI test matrix. See docs/adr/0003-gate-toolchain-pin.md.
+          go-version-file: .go-version
 
       # A tag is permanent once the proxy has served it: it cannot be moved or
       # withdrawn. Run the same gate the release script ran locally, in case the
