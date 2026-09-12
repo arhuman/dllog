@@ -233,5 +233,15 @@ func (w *statusWriter) statusCode() int {
 }
 
 // Unwrap exposes the wrapped writer to http.ResponseController, which is what
-// keeps Flush, Hijack, ReadFrom and Push working through this wrapper.
+// keeps Flush, Hijack and the read/write deadlines working through this
+// wrapper: the controller follows Unwrap, a direct type assertion does not.
+//
+// That is the limit of the transparency. Code asserting w.(http.Flusher),
+// w.(http.Pusher) or w.(io.ReaderFrom) directly sees this wrapper, not the
+// underlying writer, and Go offers no unwrapping for assertions. Re-declaring
+// those methods here would be worse: it would advertise capabilities the
+// underlying writer may not have, and ReadFrom would bypass Write and lose the
+// implicit-200 status recording. Handlers that need Flush or Hijack under this
+// middleware should go through http.NewResponseController, which is the
+// supported route since Go 1.20.
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
