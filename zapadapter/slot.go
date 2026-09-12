@@ -7,16 +7,19 @@ import (
 )
 
 // slot is what this adapter puts in a scope's ring: a zap entry with its copied
-// fields, together with the downstream core that must write it.
+// fields, the downstream core that must write it, and the replay key to mark it
+// with.
 //
-// The triple is what makes With work without reimplementing field merging. Each
-// derived Core eagerly derives its own downstream, and an entry buffered
-// through that Core carries it into the ring, so the flush writes every entry
-// through the core that was in scope when it was logged.
+// Carrying the downstream is what makes With work without reimplementing field
+// merging. Each derived Core eagerly derives its own downstream, and an entry
+// buffered through that Core carries it into the ring, so the flush writes every
+// entry through the core that was in scope when it was logged, marked the way
+// that core was configured.
 type slot struct {
 	entry      zapcore.Entry
 	fields     []zapcore.Field
 	downstream zapcore.Core
+	replayKey  string
 }
 
 // coreEntry wraps s as a core entry, closing over the write this adapter owes
@@ -24,11 +27,11 @@ type slot struct {
 // naming zap.
 func (s slot) coreEntry() core.Entry {
 	return core.Entry{
-		Emit: func(replayKey string) {
+		Emit: func() {
 			fields := make([]zapcore.Field, 0, len(s.fields)+1)
 			fields = append(fields, s.fields...)
 			fields = append(fields, zapcore.Field{
-				Key:       replayKey,
+				Key:       s.replayKey,
 				Type:      zapcore.BoolType,
 				Integer:   1,
 				Interface: nil,

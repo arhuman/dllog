@@ -9,7 +9,7 @@ import (
 // emitter builds an Entry that appends its name to out on emission, so a test
 // can assert the exact replay order the ring produced.
 func emitter(mu *sync.Mutex, out *[]string, name string) Entry {
-	return Entry{Emit: func(string) {
+	return Entry{Emit: func() {
 		mu.Lock()
 		defer mu.Unlock()
 		*out = append(*out, name)
@@ -160,27 +160,30 @@ func TestFlushEmitsInAppendOrder(t *testing.T) {
 		s.Append(emitter(&mu, &out, name))
 	}
 
-	if !Flush(s, "replay") {
+	if !Flush(s) {
 		t.Fatal("Flush reported no trip on a fresh scope")
 	}
 	if want := []string{"a", "b", "c"}; !equalStrings(out, want) {
 		t.Fatalf("emitted %v, want %v", out, want)
 	}
-	if Flush(s, "replay") {
+	if Flush(s) {
 		t.Fatal("a second Flush tripped again; the trip is one-shot")
 	}
 }
 
-// The key reaches Emit untouched: the core forwards it without interpreting it.
-func TestFlushForwardsTheKey(t *testing.T) {
-	var got string
+// Each entry marks itself: the core calls Emit and interprets nothing, so two
+// entries appended with different keys keep them through one flush.
+func TestFlushLetsEachEntryMarkItself(t *testing.T) {
+	var got []string
 	c := &Carrier{}
 	s := c.Bind(NewScopePool[Entry](8, 0))
-	s.Append(Entry{Emit: func(k string) { got = k }})
+	for _, key := range []string{"slog_key", "zap_key"} {
+		s.Append(Entry{Emit: func() { got = append(got, key) }})
+	}
 
-	Flush(s, "custom-key")
-	if got != "custom-key" {
-		t.Fatalf("Emit saw key %q, want %q", got, "custom-key")
+	Flush(s)
+	if want := []string{"slog_key", "zap_key"}; !equalStrings(got, want) {
+		t.Fatalf("emitted %v, want %v: the flush overrode per-entry keys", got, want)
 	}
 }
 
@@ -190,7 +193,7 @@ func TestFlushSkipsEntriesWithNoEmit(t *testing.T) {
 	s := c.Bind(NewScopePool[Entry](8, 0))
 	s.Append(Entry{})
 
-	if !Flush(s, "replay") {
+	if !Flush(s) {
 		t.Fatal("Flush reported no trip")
 	}
 }
@@ -213,7 +216,7 @@ func TestFlushAnnouncesEvictionOnTheOldestSurvivor(t *testing.T) {
 	s.Append(oldest)
 	s.Append(emitter(&mu, &out, "newest"))
 
-	Flush(s, "replay")
+	Flush(s)
 
 	want := []string{"dropped:1", "oldest", "newest"}
 	if !equalStrings(out, want) {
@@ -233,7 +236,7 @@ func TestFlushWithoutNotifyStillReplays(t *testing.T) {
 		s.Append(emitter(&mu, &out, name))
 	}
 
-	Flush(s, "replay")
+	Flush(s)
 	if want := []string{"b", "c"}; !equalStrings(out, want) {
 		t.Fatalf("emitted %v, want %v", out, want)
 	}

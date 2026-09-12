@@ -212,7 +212,7 @@ differently.
 
 ## Caveats
 
-All four follow from the same thing: a buffered record is written now and
+All three follow from the same thing: a buffered record is written now and
 formatted later. Worth reading before you rely on it.
 
 **A mutated value replays as it is now, not as it was.** dllog keeps your log
@@ -236,20 +236,11 @@ marker's position changes, not whether it is there. Matching slog's grouping
 rules well enough to hoist it out would cost more than the tidier output is
 worth.
 
-**The package-level `Trip(ctx)` always marks with `"replay"`.** It is a plain
-function with no handler to consult, so it cannot see a key you set with
-`WithReplayKey`. Trip through the handler instead, which knows its own
-configuration:
-
-```go
-h := dllog.New(downstream, dllog.WithReplayKey("from_buffer"))
-logger := slog.New(h)
-// ...
-h.Trip(ctx) // marks with "from_buffer"
-```
-
-Both forms are otherwise identical. Mixing them puts two different markers in
-one stream, so pick one per handler.
+Both trip forms mark a replayed record with the replay key of the handler that
+logged it, so `WithReplayKey` is honoured whichever one you call, including the
+one the middleware uses internally. `dllog.Trip(ctx)` and `h.Trip(ctx)` are
+equivalent; prefer the method when a handler is already in hand. See
+[ADR 0001](docs/adr/0001-replay-key-per-entry.md).
 
 ## zap
 
@@ -293,8 +284,9 @@ Passing the wrong one is silent: nothing errors, the records simply are not
 buffered.
 
 `Core.Trip()` is a method for the same reason, taking no context: the binding
-already happened. It marks replayed entries with the core's configured replay
-key, which a package-level function could not see.
+already happened. Each replayed entry carries the replay key of the adapter that
+logged it, so a trip raised through zap marks slog-buffered records with the
+slog handler's key and vice versa.
 
 Everything else matches the slog handler: same options (`WithLevel`,
 `WithCapacity`, `WithTripLevel`, `WithBufferFloor`, `WithPostTripLimit`,

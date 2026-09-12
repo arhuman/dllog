@@ -224,7 +224,7 @@ func (c *Core) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 		// there is no ring yet, so entries logged after this failure pass
 		// through either way.
 		if s := c.carrier.MarkTripped(); s != nil {
-			core.Flush(s, c.cfg.replayKey)
+			core.Flush(s)
 		}
 		return c.downstream.Write(ent, fields)
 	}
@@ -242,7 +242,7 @@ func (c *Core) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 		return c.downstream.Write(ent, fields)
 	}
 
-	sl := slot{entry: ent, fields: clone(fields), downstream: c.downstream}
+	sl := slot{entry: ent, fields: clone(fields), downstream: c.downstream, replayKey: c.cfg.replayKey}
 	switch c.carrier.Bind(c.pool).Append(sl.coreEntry()) {
 	case core.ActionBuffered, core.ActionSuppressed:
 		return nil
@@ -286,7 +286,7 @@ func (c *Core) Trip() {
 		return
 	}
 	if s := c.carrier.MarkTripped(); s != nil {
-		core.Flush(s, c.cfg.replayKey)
+		core.Flush(s)
 	}
 }
 

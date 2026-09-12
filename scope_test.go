@@ -264,7 +264,7 @@ func (f *fakeAdapter) log(ctx context.Context, msg string) {
 		f.emit(msg)
 		return
 	}
-	entry := core.Entry{Emit: func(string) { f.emit("replayed:" + msg) }}
+	entry := core.Entry{Emit: func() { f.emit("replayed:" + msg) }}
 	if c.Bind(f.pool).Append(entry) == core.ActionPassThrough {
 		f.emit(msg)
 	}
@@ -349,7 +349,7 @@ func TestCrossAdapterReplayIsGloballyOrdered(t *testing.T) {
 	// Route the fake's emissions into the shared sink.
 	fakeLog := func(ctx context.Context, msg string) {
 		c := core.FromContext(ctx)
-		entry := core.Entry{Emit: func(string) { record(msg) }}
+		entry := core.Entry{Emit: func() { record(msg) }}
 		if c.Bind(fake.pool).Append(entry) == core.ActionPassThrough {
 			record(msg)
 		}

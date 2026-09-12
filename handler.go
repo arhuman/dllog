@@ -204,7 +204,7 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 		// there is no ring yet, so records logged after this failure pass
 		// through either way.
 		if s := c.MarkTripped(); s != nil {
-			flush(s, h.cfg.replayKey)
+			flush(s)
 		}
 		return h.downstream.Handle(ctx, r)
 	}
@@ -222,7 +222,7 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 		return h.downstream.Handle(ctx, r)
 	}
 
-	switch s := c.bind(h.pool); s.Append(slot{record: r.Clone(), downstream: h.downstream}) {
+	switch s := c.bind(h.pool); s.Append(slot{record: r.Clone(), downstream: h.downstream, replayKey: h.cfg.replayKey}) {
 	case core.ActionBuffered:
 		return nil
 	case core.ActionSuppressed:

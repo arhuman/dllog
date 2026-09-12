@@ -106,6 +106,35 @@ func TestMiddlewareCleanRequestDiscardsBuffer(t *testing.T) {
 	}
 }
 
+// TestMiddlewareHonoursWithReplayKey is the user-visible reason for
+// docs/adr/0001-replay-key-per-entry.md. Middleware builds no Handler and trips
+// through the package-level Trip, so under the old flush-time key it marked
+// every replay with the default while handler-driven trips used the configured
+// one, splitting the stream a query filters on.
+func TestMiddlewareHonoursWithReplayKey(t *testing.T) {
+	s := &mwSink{}
+	logger := slog.New(New(s, WithReplayKey("from_buffer")))
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logger.DebugContext(r.Context(), "buffered step")
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	serve(Middleware(WithLogger(logger)), h, httptest.NewRequest(http.MethodGet, "/boom", nil))
+
+	records := s.snapshot()
+	if len(records) != 2 {
+		t.Fatalf("emitted %d records, want 2 (replay + anchor): %v", len(records), s.messages())
+	}
+	a := mwAttrs(records[0])
+	if a["from_buffer"] != true {
+		t.Errorf("middleware replay did not use the configured key: %v", a)
+	}
+	if a[DefaultReplayKey] == true {
+		t.Errorf("middleware replay fell back to the default key: %v", a)
+	}
+}
+
 func TestMiddlewareTripsOn5xxAndReplaysInOrder(t *testing.T) {
 	logger, sink := newMWLogger()
 

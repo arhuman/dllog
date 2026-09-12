@@ -9,18 +9,20 @@ import (
 //
 // The core never inspects an entry. It stores it, evicts it, and hands it back
 // at flush time by calling Emit. Everything logging-specific (the record, the
-// downstream handler, how a replay marker is rendered) is captured in the
-// closure by the adapter that appended it, which is what lets this package hold
-// entries from several adapters without naming any of their types.
+// downstream handler, the replay key, how a replay marker is rendered) is
+// captured in the closure by the adapter that appended it, which is what lets
+// this package hold entries from several adapters without naming any of their
+// types.
 //
-// key is the flush-time replay key. It reaches Emit as an opaque string the
-// core only forwards, because the key is chosen when the scope trips, not when
-// the entry is appended, and so cannot be baked into the closure.
+// The replay key is part of that capture rather than a flush-time parameter:
+// it belongs to the handler that logged the record, which is known at append
+// time, so an entry marks itself the way its origin configured it however the
+// trip was raised. See docs/adr/0001-replay-key-per-entry.md.
 type Entry struct {
 	// Emit renders the entry. It is nil only in the zero Entry, which a ring
 	// slot holds before its first write and after a clear; Flush never calls a
 	// nil Emit.
-	Emit func(key string)
+	Emit func()
 
 	// Notify renders an eviction notice for n lost entries into the same
 	// destination this entry would emit to. Flush calls it on the oldest
@@ -182,7 +184,7 @@ func HolderFromContext(ctx context.Context) Holder {
 // Entries are emitted in append order across every adapter that shares the
 // ring, because they share one ring: that ordering is the reason the carrier
 // holds a single sequence rather than one ring per adapter.
-func Flush(s *Scope[Entry], key string) bool {
+func Flush(s *Scope[Entry]) bool {
 	entries, dropped, tripped := s.Trip()
 	if !tripped {
 		return false
@@ -193,7 +195,7 @@ func Flush(s *Scope[Entry], key string) bool {
 	}
 	for _, e := range entries {
 		if e.Emit != nil {
-			e.Emit(key)
+			e.Emit()
 		}
 	}
 	return true

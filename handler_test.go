@@ -476,10 +476,12 @@ func TestHandlerTripUsesTheConfiguredReplayKey(t *testing.T) {
 	}
 }
 
-// TestPackageTripKeepsTheDefaultKey documents the deliberate split: the
-// package-level Trip stays available and stays on the default marker, so
-// existing callers are unaffected by the method above.
-func TestPackageTripKeepsTheDefaultKey(t *testing.T) {
+// TestPackageTripUsesOriginKey pins the contract from
+// docs/adr/0001-replay-key-per-entry.md: a record carries the replay key of the
+// handler that logged it, so the package-level Trip honours WithReplayKey even
+// though it holds no handler. This is what lets Middleware, which builds no
+// handler, mark replays the way the caller configured.
+func TestPackageTripUsesOriginKey(t *testing.T) {
 	c := &capture{}
 	log := slog.New(New(c, WithLevel(slog.LevelInfo), WithReplayKey("from_buffer")))
 
@@ -493,8 +495,11 @@ func TestPackageTripKeepsTheDefaultKey(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("replayed %d records, want 1: %v", len(recs), recs)
 	}
-	if !hasAttr(recs[0], DefaultReplayKey, true) {
-		t.Fatalf("package Trip should use the default key: %v", attrsOf(recs[0]))
+	if !hasAttr(recs[0], "from_buffer", true) {
+		t.Fatalf("package Trip did not use the origin handler's key: %v", attrsOf(recs[0]))
+	}
+	if hasAttr(recs[0], DefaultReplayKey, true) {
+		t.Fatalf("package Trip fell back to the default key: %v", attrsOf(recs[0]))
 	}
 }
 

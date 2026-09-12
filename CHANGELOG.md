@@ -26,6 +26,9 @@ This project adheres to [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- Replayed records carry the replay key of the handler that logged them, so
+  `WithReplayKey` is honoured by the middleware and across adapters (see
+  [ADR 0001](docs/adr/0001-replay-key-per-entry.md)).
 - In-scope records at or above the effective level are emitted immediately
   instead of lost when the scope ends cleanly.
 - Constructors panic on out-of-order levels (buffer floor <= level <= trip

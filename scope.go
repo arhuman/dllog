@@ -8,16 +8,18 @@ import (
 	"github.com/arhuman/dllog/internal/core"
 )
 
-// slot is what this adapter puts in a scope's ring: a cloned record together
-// with the downstream handler that must emit it.
+// slot is what this adapter puts in a scope's ring: a cloned record, the
+// downstream handler that must emit it, and the replay key to mark it with.
 //
-// The pair is what makes WithAttrs and WithGroup work without reimplementing
+// The triple is what makes WithAttrs and WithGroup work without reimplementing
 // attr flattening. Each derived Handler eagerly derives its own downstream, and
 // a record buffered through that Handler carries it into the ring, so the flush
-// emits every record through the handler that was in scope when it was logged.
+// emits every record through the handler that was in scope when it was logged,
+// marked the way that handler was configured.
 type slot struct {
 	record     slog.Record
 	downstream slog.Handler
+	replayKey  string
 }
 
 // entry wraps s as a core entry, closing over the emission this adapter owes
@@ -25,9 +27,9 @@ type slot struct {
 // without naming slog.
 func (s slot) entry() core.Entry {
 	return core.Entry{
-		Emit: func(replayKey string) {
+		Emit: func() {
 			r := s.record
-			r.AddAttrs(slog.Bool(replayKey, true))
+			r.AddAttrs(slog.Bool(s.replayKey, true))
 			//nolint:errcheck // a replayed record has no caller left to return to.
 			_ = s.downstream.Handle(context.Background(), r)
 		},
@@ -165,27 +167,25 @@ func Scope(ctx context.Context) (context.Context, func()) {
 // to the buffer floor pass straight through to the downstream handler until the
 // scope ends, whether or not anything had been buffered yet.
 //
-// It marks replayed records with the default key. A handler built with
-// WithReplayKey should be tripped through its own [Handler.Trip], which knows
-// the configured key; this function has no handler and cannot.
+// Each replayed record is marked with the replay key of the handler that
+// logged it, so this function honours WithReplayKey without holding a handler.
 func Trip(ctx context.Context) {
-	trip(ctx, defaultReplayKey)
+	trip(ctx)
 }
 
-// Trip flushes the scope on ctx exactly as the package-level [Trip] does, but
-// marks the replayed records with this handler's configured replay key.
+// Trip flushes the scope on ctx exactly as the package-level [Trip] does.
 //
-// Prefer it over [Trip] whenever the handler was built with WithReplayKey:
-// mixing the two would put two different markers in one stream, and a query
-// filtering on the configured key would silently miss the records that the
-// package-level function replayed.
+// It is kept because a handler is often in hand at the failure site and this
+// spelling says so. Since a record now carries the replay key of the handler
+// that logged it, the two are equivalent: neither imposes a key on records
+// logged through a different handler. See
+// docs/adr/0001-replay-key-per-entry.md.
 func (h *Handler) Trip(ctx context.Context) {
-	trip(ctx, h.cfg.replayKey)
+	trip(ctx)
 }
 
-// trip carries the shared behaviour of both entry points. They differ only in
-// which marker key they hand to the flush.
-func trip(ctx context.Context, replayKey string) {
+// trip carries the shared behaviour of both entry points.
+func trip(ctx context.Context) {
 	c := fromContext(ctx)
 	if c == nil {
 		return
@@ -196,7 +196,7 @@ func trip(ctx context.Context, replayKey string) {
 		// when one is created. There is nothing to replay.
 		return
 	}
-	flush(s, replayKey)
+	flush(s)
 }
 
 // flush drains a tripped scope to the downstream handlers captured with each
@@ -205,8 +205,8 @@ func trip(ctx context.Context, replayKey string) {
 //
 // The dropped-count marker is emitted before the batch so the replayed sequence
 // reads in order: what was lost, then what was kept.
-func flush(s *core.Scope[core.Entry], replayKey string) bool {
-	return core.Flush(s, replayKey)
+func flush(s *core.Scope[core.Entry]) bool {
+	return core.Flush(s)
 }
 
 // emitDropped reports entries the ring evicted, as one record carrying the

@@ -16,10 +16,6 @@ const (
 	DroppedMessage = "dllog: buffered records dropped"
 )
 
-// defaultReplayKey is the constant Trip falls back to, since a package-level
-// function cannot reach a Handler's configured key.
-const defaultReplayKey = DefaultReplayKey
-
 // Option configures a Handler. Options are applied by New in the order given.
 type Option func(*config)
 
@@ -96,9 +92,9 @@ func WithPostTripLimit(n int) Option {
 // WithReplayKey sets the attr key marking replayed records. Defaults to
 // "replay".
 //
-// It applies to replays triggered by a record at the trip level. The
-// package-level Trip has no Handler to read it from and always uses the
-// default key.
+// The key travels with each buffered record, so it applies however the replay
+// was triggered: by a record at the trip level, by either Trip form, or by the
+// middleware. See docs/adr/0001-replay-key-per-entry.md.
 func WithReplayKey(k string) Option {
 	return func(c *config) {
 		if k != "" {
