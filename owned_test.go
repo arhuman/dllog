@@ -157,7 +157,9 @@ func TestOwnedConstructorTracksDynamicFloor(t *testing.T) {
 	lv.Set(slog.LevelWarn)
 
 	var buf bytes.Buffer
-	h := NewJSON(&buf, WithBufferFloor(lv))
+	// The level rides the same LevelVar so the floor <= level ordering holds
+	// at construction and keeps holding when the floor moves.
+	h := NewJSON(&buf, WithBufferFloor(lv), WithLevel(lv))
 	ctx := context.Background()
 
 	if h.downstream.Enabled(ctx, slog.LevelDebug) {

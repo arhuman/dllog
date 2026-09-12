@@ -177,12 +177,17 @@ them.
 
 | Option | Default | Effect |
 |---|---|---|
-| `WithLevel` | `Info` | Effective level when no scope is active |
+| `WithLevel` | `Info` | Effective level: records at or above it are emitted as usual, in a scope or out of one; below it they are buffered in a scope and dropped outside |
 | `WithBufferFloor` | `Debug` | Lowest level captured inside a scope |
 | `WithTripLevel` | `Error` | Level at which a record triggers replay |
 | `WithCapacity` | 256 | Ring slots per scope |
 | `WithPostTripLimit` | 0 (unlimited) | Records allowed through after a trip |
 | `WithReplayKey` | `"replay"` | Attribute marking a replayed record |
+
+The three levels must satisfy buffer floor <= level <= trip level. A
+configuration that breaks that order could never buffer and replay, so every
+constructor rejects it with a panic rather than shipping a handler that does
+nothing.
 
 Middleware options:
 

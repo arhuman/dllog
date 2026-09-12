@@ -43,8 +43,9 @@ func newConfig() config {
 	}
 }
 
-// WithLevel sets the effective level: outside a scope, entries below it are
-// dropped. Defaults to zapcore.InfoLevel.
+// WithLevel sets the effective level: entries at or above it are written as
+// usual, inside a scope or out of one. Below it, entries are buffered inside a
+// scope and dropped outside. Defaults to zapcore.InfoLevel.
 //
 // This is the level the Core owns. The downstream core must stay wide open at
 // the buffer floor so it cannot swallow replays; New checks that.

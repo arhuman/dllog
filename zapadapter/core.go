@@ -40,9 +40,10 @@ import (
 // A Core is bound to at most one context, by [Core.For]. Unbound, it is an
 // ordinary level filter in front of the downstream core, and an entry below the
 // level costs what a disabled zap call costs. Bound, entries from the buffer
-// floor up are appended to the scope's bounded ring; an entry at or above the
-// trip level flushes that ring to the downstream core, oldest first, before the
-// triggering entry is written.
+// floor up to the effective level are appended to the scope's bounded ring,
+// entries at or above the effective level are written immediately, and an entry
+// at or above the trip level flushes the ring to the downstream core, oldest
+// first, before the triggering entry is written.
 //
 // A Core is safe for concurrent use. Build one with [New].
 type Core struct {
@@ -58,12 +59,23 @@ type Core struct {
 
 // resolve applies opts over the defaults. Shared by every constructor so the
 // option set cannot drift between them.
+//
+// It panics when the resolved levels are out of order: buffer floor above the
+// effective level silently drops in-scope entries the level promised, and an
+// effective level above the trip level trips on entries that would never be
+// written, so neither configuration can do what the package exists for.
 func resolve(opts []Option) config {
 	cfg := newConfig()
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
 		}
+	}
+	if cfg.bufferFloor > cfg.level || cfg.level > cfg.tripLevel {
+		panic(fmt.Sprintf(
+			"dllog/zapadapter: levels out of order: buffer floor %v, level %v, trip level %v; "+
+				"WithBufferFloor <= WithLevel <= WithTripLevel must hold or the core can never buffer and replay",
+			cfg.bufferFloor, cfg.level, cfg.tripLevel))
 	}
 	return cfg
 }
@@ -194,10 +206,11 @@ func (c *Core) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.Check
 //
 // Without a scope, ent reaches the downstream core when it is at or above the
 // configured level and is dropped otherwise. Within a scope, an entry below the
-// trip level is cloned into the ring; an entry at or above it trips the scope,
-// flushing the buffer to the downstream cores the buffered entries were logged
-// through before ent itself is written. Everything happens synchronously, on
-// the calling goroutine.
+// effective level is cloned into the ring, an entry at or above it is written
+// immediately, and an entry at or above the trip level trips the scope, flushing
+// the buffer to the downstream cores the buffered entries were logged through
+// before ent itself is written. Everything happens synchronously, on the calling
+// goroutine.
 func (c *Core) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 	if c.carrier == nil {
 		if ent.Level < c.cfg.level {
@@ -212,6 +225,19 @@ func (c *Core) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 		// through either way.
 		if s := c.carrier.MarkTripped(); s != nil {
 			core.Flush(s, c.cfg.replayKey)
+		}
+		return c.downstream.Write(ent, fields)
+	}
+
+	// At or above the effective level the entry is written on the spot and
+	// never buffered: the buffer withholds only what the level would have
+	// silenced, so a scope that ends cleanly must not swallow an entry the
+	// caller was owed. After a trip it draws on the same post-trip budget as
+	// everything else. A trip racing this check can let one entry through
+	// unbudgeted; that entry was writable either way.
+	if ent.Level >= c.cfg.level {
+		if c.carrier.Tripped() && c.carrier.Bind(c.pool).PassThrough() == core.ActionSuppressed {
+			return nil
 		}
 		return c.downstream.Write(ent, fields)
 	}

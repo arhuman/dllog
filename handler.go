@@ -14,9 +14,11 @@ import (
 //
 // Outside a scope it is an ordinary level filter in front of the downstream
 // handler, and a call below the level costs what a disabled slog call costs.
-// Inside a scope, records from the buffer floor up are cloned into a bounded
-// ring; a record at or above the trip level flushes that ring to the downstream
-// handler, oldest first, before the triggering record is emitted.
+// Inside a scope, records from the buffer floor up to the effective level are
+// cloned into a bounded ring, records at or above the effective level are
+// emitted immediately, and a record at or above the trip level flushes the ring
+// to the downstream handler, oldest first, before the triggering record is
+// emitted.
 //
 // A Handler is safe for concurrent use. Build one with New.
 type Handler struct {
@@ -27,12 +29,26 @@ type Handler struct {
 
 // resolve applies opts over the defaults. Shared by every constructor so the
 // option set cannot drift between them.
+//
+// It panics when the resolved levels are out of order: buffer floor above the
+// effective level silently drops in-scope records the level promised, and an
+// effective level above the trip level trips on records that would never be
+// emitted, so neither configuration can do what the package exists for. The
+// check is a construction-time snapshot, like New's downstream probe: a dynamic
+// Leveler reordered afterwards is the caller's contract to keep.
 func resolve(opts []Option) config {
 	cfg := newConfig()
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
 		}
+	}
+	floor, level, trip := cfg.bufferFloor.Level(), cfg.level.Level(), cfg.tripLevel.Level()
+	if floor > level || level > trip {
+		panic(fmt.Sprintf(
+			"dllog: levels out of order: buffer floor %v, level %v, trip level %v; "+
+				"WithBufferFloor <= WithLevel <= WithTripLevel must hold or the handler can never buffer and replay",
+			floor, level, trip))
 	}
 	return cfg
 }
@@ -169,10 +185,11 @@ func (h *Handler) Enabled(ctx context.Context, level slog.Level) bool {
 //
 // Without a scope, r reaches the downstream handler when it is at or above the
 // configured level and is dropped otherwise. Within a scope, a record below the
-// trip level is cloned into the ring; a record at or above it trips the scope,
-// flushing the buffer to the downstream handlers the buffered records were
-// logged through before r itself is emitted. Everything happens synchronously,
-// on the calling goroutine.
+// effective level is cloned into the ring, a record at or above it is emitted
+// immediately, and a record at or above the trip level trips the scope, flushing
+// the buffer to the downstream handlers the buffered records were logged through
+// before r itself is emitted. Everything happens synchronously, on the calling
+// goroutine.
 func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	c := fromContext(ctx)
 	if c == nil {
@@ -188,6 +205,19 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 		// through either way.
 		if s := c.MarkTripped(); s != nil {
 			flush(s, h.cfg.replayKey)
+		}
+		return h.downstream.Handle(ctx, r)
+	}
+
+	// At or above the effective level the record is emitted on the spot and
+	// never buffered: the buffer withholds only what the level would have
+	// silenced, so a scope that ends cleanly must not swallow a record the
+	// caller was owed. After a trip it draws on the same post-trip budget as
+	// everything else. A trip racing this check can let one record through
+	// unbudgeted; that record was emittable either way.
+	if r.Level >= h.cfg.level.Level() {
+		if c.Tripped() && c.bind(h.pool).PassThrough() == core.ActionSuppressed {
+			return nil
 		}
 		return h.downstream.Handle(ctx, r)
 	}

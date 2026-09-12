@@ -73,6 +73,10 @@ func (r *ring) Append(s slot) core.Action { return r.scope.Append(s.entry()) }
 // Capacity returns the shared ring's size.
 func (r *ring) Capacity() int { return r.scope.Capacity() }
 
+// PassThrough reports what the caller must do with a record it never buffers,
+// exactly as the underlying scope does.
+func (r *ring) PassThrough() core.Action { return r.scope.PassThrough() }
+
 // Trip flushes the shared ring, returning the raw core entries. The emitting
 // paths go through flush, which knows the configured replay key; this is the
 // form the tests reach for when they only need to know whether a trip took.

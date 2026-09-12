@@ -46,8 +46,9 @@ func newConfig() config {
 	}
 }
 
-// WithLevel sets the effective level: outside a scope, records below it are
-// dropped. Defaults to slog.LevelInfo.
+// WithLevel sets the effective level: records at or above it are emitted as
+// usual, inside a scope or out of one. Below it, records are buffered inside a
+// scope and dropped outside. Defaults to slog.LevelInfo.
 //
 // This is the level the Handler owns. The downstream handler must stay wide
 // open at the buffer floor so it cannot swallow replays; New checks that.

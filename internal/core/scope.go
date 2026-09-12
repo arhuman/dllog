@@ -142,6 +142,28 @@ func (s *Scope[T]) Append(entry T) Action {
 	return ActionBuffered
 }
 
+// PassThrough reports what the caller must do with an entry it never buffers:
+// one at or above the effective level, emitted on the spot rather than withheld
+// for a replay. Before the trip it always passes, and the atomic fast path
+// keeps that common case off the mutex. After the trip it draws on the same
+// post-trip budget as every other entry, so the budget bounds the scope's whole
+// output, not only the records the trip unlocked.
+func (s *Scope[T]) PassThrough() Action {
+	if !s.tripped.Load() {
+		return ActionPassThrough
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || !s.tripState {
+		return ActionPassThrough
+	}
+	if s.limit > 0 && s.postTrip >= s.limit {
+		return ActionSuppressed
+	}
+	s.postTrip++
+	return ActionPassThrough
+}
+
 // Trip flushes the scope exactly once. On the first call it returns the
 // buffered entries in insertion order (oldest first), the number of entries the
 // ring evicted, and tripped=true. Any later call, or a call on a closed scope,

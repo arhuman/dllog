@@ -40,6 +40,17 @@ This project adheres to [Semantic Versioning](https://semver.org).
   no context, the scope is bound once via `Core.For(ctx)` and the caller carries
   the derived logger. `zap` is imported only by that package.
 
+### Fixed
+
+- Records at or above the effective level are now emitted immediately inside a
+  scope. They were buffered together with everything below the trip level, so a
+  scope that ended cleanly discarded them: a service logging at Info lost its
+  Info and Warn records on every successful request. After a trip they draw on
+  the same post-trip budget as every other record.
+- The three levels are validated at construction: every constructor panics
+  unless buffer floor <= level <= trip level holds, instead of accepting a
+  configuration that could never buffer and replay.
+
 ### Security
 
 - The middleware's anchor record now logs the matched route pattern

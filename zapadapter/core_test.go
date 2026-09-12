@@ -239,12 +239,15 @@ func TestCleanScopeDiscardsBuffer(t *testing.T) {
 	ctx, done := dllog.Scope(context.Background())
 	zapLog := newLogger(base.For(ctx))
 	zapLog.Debug("never seen")
-	zapLog.Info("also never seen")
+	zapLog.Info("seen immediately")
 	done()
 
-	if got := s.messages(); len(got) != 0 {
-		t.Fatalf("messages = %v, want none: a scope that ends without tripping "+
-			"must discard its buffer", got)
+	// The Debug entry is buffered and discarded; the Info entry is at the
+	// effective level, so the scope must not have withheld it.
+	want := []string{"seen immediately"}
+	if got := s.messages(); !equal(got, want) {
+		t.Fatalf("messages = %v, want %v: a clean scope discards its buffer "+
+			"but never an at-level entry", got, want)
 	}
 }
 
@@ -434,7 +437,9 @@ func TestCheckGatesEntries(t *testing.T) {
 	log.Info("at the floor")
 	log.Error("boom")
 
-	want := []string{"at the floor[replay]", "boom"}
+	// The Info entry sits at the effective level, so it is written on the spot
+	// rather than buffered, and the trip finds nothing to replay.
+	want := []string{"at the floor", "boom"}
 	if got := s.messages(); !equal(got, want) {
 		t.Fatalf("messages = %v, want %v: Check must drop below-floor entries", got, want)
 	}

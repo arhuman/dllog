@@ -365,3 +365,31 @@ func TestActionString(t *testing.T) {
 		}
 	}
 }
+
+func TestPassThroughStates(t *testing.T) {
+	s := NewScope[int](4, 2)
+
+	// Untripped: always passes, and consumes nothing.
+	if got := s.PassThrough(); got != ActionPassThrough {
+		t.Fatalf("untripped PassThrough = %v, want ActionPassThrough", got)
+	}
+
+	s.Trip()
+
+	// Tripped: draws on the same post-trip budget as Append.
+	if got := s.PassThrough(); got != ActionPassThrough {
+		t.Fatalf("first post-trip PassThrough = %v, want ActionPassThrough", got)
+	}
+	if got := s.Append(1); got != ActionPassThrough {
+		t.Fatalf("second post-trip Append = %v, want ActionPassThrough", got)
+	}
+	if got := s.PassThrough(); got != ActionSuppressed {
+		t.Fatalf("PassThrough past the budget = %v, want ActionSuppressed", got)
+	}
+
+	// Closed: back to unconditional pass, exactly as Append behaves.
+	s.Close()
+	if got := s.PassThrough(); got != ActionPassThrough {
+		t.Fatalf("closed PassThrough = %v, want ActionPassThrough", got)
+	}
+}
